@@ -1,75 +1,101 @@
 # SHL Assessment Recommendation System - Design Document
 
-## Overview
-The SHL Assessment Recommendation System is designed to help hiring managers find the most relevant SHL assessments for their job openings. It takes natural language queries, job descriptions, or URLs as input and returns appropriate SHL assessments matched to the requirements.
+## System Architecture
 
-## Architecture
+The SHL Assessment Recommendation System is designed as a multi-component application that uses modern AI techniques to match job requirements with appropriate assessment tools from SHL's catalog.
 
-### Components
-1. **Data Collection Module**
-   - Scrapes and extracts assessment data from SHL's catalog
-   - Preprocesses data for embedding and storage
-   - Stores data in MongoDB for persistence and JSON files as backup
+### Architecture Components
 
-2. **Vector Embedding Engine**
-   - Converts assessment descriptions into vector embeddings using sentence-transformers
-   - Creates a FAISS index for efficient similarity search
-   - Enables semantic matching between queries and assessments
+1. **Data Collection**
+   - Web scraping of SHL product catalog using BeautifulSoup
+   - Data cleaning and structuring
+   - MongoDB storage with two collections: packaged and individual solutions
 
-3. **Query Enhancement with LLM**
-   - Uses Google's Gemini Pro model through LangChain
-   - Enhances user queries with relevant skills and competencies
-   - Improves semantic matching accuracy
+2. **Vector Embedding Layer**
+   - FAISS vector database for efficient similarity search
+   - Dimension: 1536 for optimal performance
 
-4. **Constraint Extraction**
-   - Extracts time/duration constraints from user queries
-   - Filters recommendations based on these constraints
-   - Ensures results match specific user requirements
+3. **Query Processing**
+   - Constraint extraction (duration, skills, job level)
+   - URL content extraction when provided
 
-5. **FastAPI Backend**
-   - Provides REST API endpoints for recommendations
-   - Accepts both GET and POST requests
-   - Returns structured JSON responses with assessment details
+4. **Recommendation Engine**
+   - Vector similarity search with cosine similarity
+   - Constraint filtering
+   - Result ranking and formatting
 
-6. **Streamlit Frontend**
-   - Provides an intuitive user interface
-   - Displays results in a clear, organized format
-   - Includes helpful examples and explanations
+5. **API Layer**
+   - FastAPI for RESTful endpoints
+   - JSON response format
+   - Input validation and error handling
+
+6. **User Interface**
+   - Streamlit for interactive web interface
+   - Responsive design for multiple devices
+   - User-friendly results display
+
+## Key Technical Choices
+
+### Vector Search Implementation
+
+The system uses FAISS for vector similarity search because:
+1. **Speed**: Extremely fast retrieval even with large datasets
+2. **Accuracy**: High-quality similarity matching
+3. **Memory Efficiency**: Optimized for large embedding collections
+4. **Integration**: Easy integration with Python ecosystem
+
+### MongoDB Integration
+
+The database design uses two collections:
+- `packaged_solutions`: Pre-packaged assessment bundles
+- `individual_solutions`: Individual assessments
+
+Each document contains:
+- Assessment details (name, URL, duration, etc.)
+- Test type information
+- Job level suitability
+- Remote testing capabilities
+- Adaptive/IRT support
 
 ## Data Flow
 
-1. **Data Collection and Preparation**
-   - Assessment data is scraped from SHL catalog
-   - Data is cleaned and preprocessed
-   - Text features are combined for embedding
-   - Data is stored in MongoDB and as JSON files
+1. **User Input**: Query text or URL
+2. **Constraint Extraction**: Identify time/skill constraints
+3. **Embedding Generation**: Convert query to vector representation
+4. **Vector Search**: Find similar assessments in FAISS index
+5. **Filtering**: Apply constraints to results
+6. **Ranking**: Order by relevance score
+7. **Response**: Return formatted results to user
 
-2. **Vector Embedding Creation**
-   - Assessment descriptions are converted to vector embeddings
-   - A FAISS index is created for similarity search
-   - Model and index are saved for reuse
+## Performance Considerations
 
-3. **Query Processing**
-   - User submits a query, job description, or URL
-   - If URL is provided, content is extracted and added to the query
-   - Query is enhanced using Gemini Pro LLM
-   - Time constraints are extracted if present
+The system is evaluated using:
+- **Mean Recall@K**: Measures ability to retrieve relevant assessments
+- **MAP@K**: Evaluates ranking quality
+- **Response Time**: < 3 seconds for typical queries
+- **Embedding Creation**: Batch processing for efficiency
+- **Caching**: Frequently accessed embeddings are cached
 
-4. **Recommendation Generation**
-   - Enhanced query is converted to a vector embedding
-   - Similar assessments are found using FAISS
-   - Results are filtered based on constraints
-   - Top recommendations are returned with details
+## Fallback Mechanisms
+
+The system includes multiple fallback strategies:
+1. MongoDB connection issues → Local JSON data
+2. FAISS index corruption → Automatic regeneration
+
+## Future Enhancements
+
+1. **Enhanced Multimodal Support**: Process images of job descriptions
+2. **Custom Assessment Packages**: Generate custom assessment combinations
+3. **User Feedback Loop**: Improve recommendations based on user selections
+4. **Expanded Metadata**: Include more detailed assessment characteristics
+5. **Cross-lingual Capabilities**: Improved support for non-English queries
 
 ## Technology Stack
 
 - **Backend**: Python, FastAPI
 - **Frontend**: Streamlit
 - **Database**: MongoDB
-- **ML/AI**: 
-  - Sentence Transformers for embeddings
-  - FAISS for vector similarity search
-  - Google Gemini Pro via LangChain for query enhancement
+- **ML/AI**: FAISS for vector similarity search
 - **Data Processing**: Pandas, NumPy
 - **Web Scraping**: BeautifulSoup, Requests
 

@@ -7,6 +7,8 @@ import time
 from dotenv import load_dotenv
 from pymongo import MongoClient
 from urllib.parse import urljoin
+import re
+import traceback
 
 # Import Selenium libraries for dynamic content
 from selenium import webdriver
@@ -210,7 +212,7 @@ def parse_table(table, headers, solution_type):
                     "remote_testing": False,
                     "adaptive_irt": False,
                     "test_type": [],
-                    "test_type_details": {}
+                    "test_type_names": []
                 }
                 
                 # Add remote testing, adaptive/IRT and test type if available
@@ -221,13 +223,21 @@ def parse_table(table, headers, solution_type):
                     solution["adaptive_irt"] = bool(cells[adaptive_index].find('span', class_='check-mark') or '●' in cells[adaptive_index].get_text())
                 
                 if test_type_index is not None:
+                    # Define test type mapping
+                    test_type_mapping = {
+                        'A': 'Ability & Aptitude',
+                        'B': 'Biodata & Situational Judgement',
+                        'C': 'Competencies',
+                        'D': 'Development & 360',
+                        'P': 'Assessment Exercises',
+                        'K': 'Knowledge & Skills',
+                        'S': 'Personality & Behavior'
+                    }
+                    
                     test_types = [t.strip() for t in cells[test_type_index].get_text().strip().split() if t.strip() in ['A', 'B', 'C', 'D', 'P', 'K', 'S']]
                     for test_type in test_types:
                         solution["test_type"].append(test_type)
-                        solution["test_type_details"][test_type] = {
-                            'name': '',  # Will be filled in from detail page
-                            'description': ''  # Will be filled in from detail page
-                        }
+                        solution["test_type_names"].append(test_type_mapping.get(test_type, test_type))
                 
                 print(f"Parsed solution: {solution['name']}")
                 solutions.append(solution)
@@ -242,11 +252,8 @@ def parse_table(table, headers, solution_type):
 
 def parse_solution_details(url):
     """Parse the details page of a solution."""
-    # Try with requests first, if it fails use Selenium
-    soup = get_page_content(url)
-    if not soup or not soup.find(['h1', 'h2', 'h3']):
-        # If no headings found, the page might be dynamically rendered - try with Selenium
-        soup = get_page_content(url, use_selenium=True)
+    # Always use Selenium for detail pages to ensure we get dynamic content
+    soup = get_page_content(url, use_selenium=True)
     
     if not soup:
         return {}
@@ -267,182 +274,290 @@ def parse_solution_details(url):
         "job_levels": [],
         "languages": [],
         "assessment_length": "",
+        "duration_minutes": None,
         "remote_testing": False,
         "adaptive_irt": False,
         "test_type": [],
-        "test_type_details": {},  # Store detailed test type information
         "test_type_names": []     # Store mapped test type names
     }
     
     try:
         # Debug info
         print(f"Solution page title: {soup.title.text if soup.title else 'No title'}")
+        print(f"Parsing solution details from URL: {url}")
         
-        # Extract the description
+        # Extract the description - try multiple approaches
         description_found = False
-        current_test_type = None
         
-        # Try finding by heading text
-        description_section = soup.find(['h1', 'h2', 'h3'], string='Description')
-        if description_section:
-            description_found = True
-            description_paragraphs = description_section.find_next_siblings('p')
-            solution_detail['description'] = ' '.join([p.get_text().strip() for p in description_paragraphs if p.get_text().strip()])
+        # 1. Look for the main content div that might contain the description
+        main_content = soup.find('div', class_=lambda c: c and ('main-content' in c.lower() or 'product-details' in c.lower()))
+        if main_content:
+            # Try to find a section with "Description" header or similar
+            for header in main_content.find_all(['h1', 'h2', 'h3', 'h4', 'strong']):
+                if 'description' in header.text.lower() or 'about this solution' in header.text.lower():
+                    # Get the paragraphs after this header
+                    description_text = []
+                    next_elem = header.find_next(['p', 'div'])
+                    while next_elem and next_elem.name in ['p', 'div'] and not next_elem.find(['h1', 'h2', 'h3', 'h4']):
+                        description_text.append(next_elem.get_text().strip())
+                        next_elem = next_elem.find_next_sibling()
+                    
+                    if description_text:
+                        solution_detail['description'] = ' '.join(description_text)
+                        description_found = True
+                        break
         
-        # Try finding by class
+        # 2. Try finding by class or section containing "description"
         if not description_found:
             description_section = soup.find(class_=lambda c: c and 'description' in c.lower())
             if description_section:
-                description_found = True
                 solution_detail['description'] = description_section.get_text().strip()
+                description_found = True
         
-        # Try finding content after a Description keyword anywhere
+        # 3. Look for sections with specific pattern - Description: or Description followed by text
         if not description_found:
-            for element in soup.find_all(['p', 'div']):
-                if 'Description' in element.get_text():
+            for elem in soup.find_all(['p', 'div']):
+                text = elem.get_text().strip()
+                if text.startswith('Description:') or text.startswith('Description -') or 'solution description' in text.lower():
+                    solution_detail['description'] = text.split(':', 1)[1].strip() if ':' in text else text.split('-', 1)[1].strip()
                     description_found = True
-                    next_elements = []
-                    current = element.next_sibling
-                    while current and current.name != 'h1' and current.name != 'h2' and current.name != 'h3':
-                        if current.name == 'p':
-                            next_elements.append(current.get_text().strip())
-                        current = current.next_sibling
+                    break
+        
+        # 4. Try to extract description from meta tags
+        if not description_found:
+            meta_desc = soup.find('meta', attrs={'name': 'description'})
+            if meta_desc and 'content' in meta_desc.attrs:
+                solution_detail['description'] = meta_desc['content']
+                description_found = True
+                
+        # 5. Look for the first substantial paragraph in the main content area
+        if not description_found and main_content:
+            paragraphs = main_content.find_all('p', recursive=False)
+            if paragraphs and len(paragraphs[0].get_text().strip()) > 50:  # At least 50 chars to be substantial
+                solution_detail['description'] = paragraphs[0].get_text().strip()
+                description_found = True
+        
+        # Extract job levels - try multiple approaches
+        # 1. Look for a section with "Job Levels" header
+        job_levels_found = False
+        for header in soup.find_all(['h1', 'h2', 'h3', 'h4', 'strong']):
+            if 'job level' in header.text.lower() or 'position level' in header.text.lower():
+                # Get the text after this header
+                next_elem = header.find_next(['p', 'div', 'ul'])
+                if next_elem:
+                    # Handle different formats (comma-separated list or bullet points)
+                    if next_elem.name == 'ul':
+                        job_levels = [li.get_text().strip() for li in next_elem.find_all('li')]
+                    else:
+                        job_levels_text = next_elem.get_text().strip()
+                        job_levels = [level.strip() for level in re.split(r'[,;•]', job_levels_text)]
                     
-                    solution_detail['description'] = ' '.join(next_elements)
+                    solution_detail['job_levels'] = [jl for jl in job_levels if jl]
+                    job_levels_found = True
                     break
         
-        # Extract job levels
-        job_levels_section = soup.find(['h1', 'h2', 'h3'], string=lambda s: s and 'job level' in s.lower())
-        if job_levels_section:
-            job_levels = job_levels_section.find_next_sibling('p')
-            if job_levels:
-                solution_detail['job_levels'] = [level.strip() for level in job_levels.get_text().split(',')]
-        
-        # Extract languages
-        languages_section = soup.find(['h1', 'h2', 'h3'], string=lambda s: s and 'language' in s.lower())
-        if languages_section:
-            languages = languages_section.find_next_sibling('p')
-            if languages:
-                solution_detail['languages'] = [lang.strip() for lang in languages.get_text().split(',')]
-        
-        # Extract assessment length
-        assessment_section = soup.find(['h1', 'h2', 'h3'], string=lambda s: s and 'assessment length' in s.lower())
-        if assessment_section:
-            assessment_length = assessment_section.find_next_sibling('p')
-            if assessment_length:
-                solution_detail['assessment_length'] = assessment_length.get_text().strip()
-                # Try to extract minutes
-                solution_detail['duration_minutes'] = extract_duration_minutes(assessment_length.get_text())
-        
-        # Another approach for assessment length - look for text containing "minutes"
-        if not solution_detail['assessment_length']:
-            for p in soup.find_all('p'):
-                if 'minute' in p.text.lower() and ('completion time' in p.text.lower() or 'assessment length' in p.text.lower()):
-                    solution_detail['assessment_length'] = p.text.strip()
-                    solution_detail['duration_minutes'] = extract_duration_minutes(p.text)
+        # 2. Look for any element that mentions "Job Levels" followed by a list
+        if not job_levels_found:
+            for elem in soup.find_all(['p', 'div', 'td']):
+                text = elem.get_text().strip()
+                if text.startswith('Job levels:') or text.startswith('Job Levels:') or 'position levels:' in text.lower():
+                    levels_text = text.split(':', 1)[1].strip()
+                    solution_detail['job_levels'] = [level.strip() for level in re.split(r'[,;•]', levels_text)]
+                    job_levels_found = True
                     break
         
-        # Extract test types and their details
-        test_type_section = soup.find(['h1', 'h2', 'h3'], string=lambda s: s and 'test type' in s.lower())
-        if test_type_section:
-            # Look for test type indicators (A, B, C, D, P, K, S)
-            for element in test_type_section.find_all_next(['p', 'div']):
-                text = element.get_text().strip()
-                if any(test_type in text for test_type in ['A', 'B', 'C', 'D', 'P', 'K', 'S']):
-                    # Found a test type line
-                    test_type = text.split()[0]  # Get the test type letter
-                    if test_type in ['A', 'B', 'C', 'D', 'P', 'K', 'S']:
-                        solution_detail['test_type'].append(test_type)
-                        # Add the mapped name to test_type_names
-                        solution_detail['test_type_names'].append(test_type_mapping.get(test_type, test_type))
-                        current_test_type = test_type
-                        solution_detail['test_type_details'][test_type] = {
-                            'name': test_type_mapping.get(test_type, 
-                                   text.split('-')[1].strip() if '-' in text else text.strip()),
-                            'description': ''
-                        }
-                elif current_test_type and text and not text.startswith(('A', 'B', 'C', 'D', 'P', 'K', 'S')):
-                    # Add description for current test type
-                    solution_detail['test_type_details'][current_test_type]['description'] += text + " "
+        # 3. Look for common job level terms in any content
+        if not job_levels_found:
+            common_job_levels = ['Entry-Level', 'Mid-Professional', 'Senior-Professional', 'Manager', 'Executive']
+            for elem in soup.find_all(['p', 'div', 'li']):
+                text = elem.get_text().strip()
+                for level in common_job_levels:
+                    if level.lower() in text.lower() and level not in solution_detail['job_levels']:
+                        solution_detail['job_levels'].append(level)
+                        job_levels_found = True
         
-        # If no test types were found on the detail page, try to extract from any element that mentions test types
-        if not solution_detail['test_type']:
-            for element in soup.find_all(['p', 'div', 'span']):
-                text = element.get_text().strip()
+        # Extract languages - try multiple approaches
+        # 1. Look for a section with "Languages" header
+        languages_found = False
+        for header in soup.find_all(['h1', 'h2', 'h3', 'h4', 'strong']):
+            if 'language' in header.text.lower() and 'programming' not in header.text.lower():
+                # Get the text after this header
+                next_elem = header.find_next(['p', 'div', 'ul'])
+                if next_elem:
+                    # Handle different formats (comma-separated list or bullet points)
+                    if next_elem.name == 'ul':
+                        languages = [li.get_text().strip() for li in next_elem.find_all('li')]
+                    else:
+                        languages_text = next_elem.get_text().strip()
+                        languages = [lang.strip() for lang in re.split(r'[,;•]', languages_text)]
+                    
+                    solution_detail['languages'] = [lang for lang in languages if lang]
+                    languages_found = True
+                    break
+        
+        # 2. Look for any element that mentions "Languages" followed by a list
+        if not languages_found:
+            for elem in soup.find_all(['p', 'div', 'td']):
+                text = elem.get_text().strip()
+                if text.startswith('Languages:') or 'available in:' in text.lower() or 'available languages:' in text.lower():
+                    langs_text = text.split(':', 1)[1].strip()
+                    solution_detail['languages'] = [lang.strip() for lang in re.split(r'[,;•]', langs_text)]
+                    languages_found = True
+                    break
+        
+        # 3. Look for common language terms in any content
+        if not languages_found:
+            common_languages = ['English', 'Spanish', 'French', 'German', 'Chinese', 'Japanese']
+            for elem in soup.find_all(['p', 'div', 'li']):
+                text = elem.get_text().strip()
+                for lang in common_languages:
+                    if lang in text and '(' in text and ')' in text:  # Language often appears like "English (US)"
+                        full_lang = text[text.find(lang):text.find(')', text.find(lang)) + 1].strip()
+                        if full_lang and full_lang not in solution_detail['languages']:
+                            solution_detail['languages'].append(full_lang)
+                            languages_found = True
+                    elif lang in text and lang not in solution_detail['languages']:
+                        solution_detail['languages'].append(lang)
+                        languages_found = True
+        
+        # Extract assessment length - improved method with more patterns
+        assessment_found = False
+        
+        # 0. Look specifically for the pattern in the example: "Approximate Completion Time in minutes = X"
+        for elem in soup.find_all('p'):
+            text = elem.get_text().strip()
+            if 'approximate completion time in minutes' in text.lower():
+                print(f"Found completion time pattern: {text}")
+                solution_detail['assessment_length'] = text
+                minutes_match = re.search(r'=\s*(\d+)', text)
+                if minutes_match:
+                    solution_detail['duration_minutes'] = int(minutes_match.group(1))
+                else:
+                    solution_detail['duration_minutes'] = extract_duration_minutes(text)
+                assessment_found = True
+                break
+        
+        # 1. Look for a section with "Assessment Length" header
+        if not assessment_found:
+            for header in soup.find_all(['h1', 'h2', 'h3', 'h4', 'strong']):
+                if 'assessment length' in header.text.lower() or 'completion time' in header.text.lower() or 'test duration' in header.text.lower():
+                    # Get the text after this header
+                    next_elem = header.find_next(['p', 'div'])
+                    if next_elem:
+                        text = next_elem.get_text().strip()
+                        print(f"Found completion time via header: {text}")
+                        solution_detail['assessment_length'] = text
+                        solution_detail['duration_minutes'] = extract_duration_minutes(text)
+                        assessment_found = True
+                        break
+        
+        # 2. Look for any element that contains "Completion Time" or similar
+        if not assessment_found:
+            time_patterns = [
+                'completion time', 'assessment length', 'test duration', 
+                'approximate time', 'time to complete', 'takes approximately',
+                'duration:', 'time:', 'minutes to complete'
+            ]
+            for elem in soup.find_all(['p', 'div', 'li', 'td', 'span']):
+                text = elem.get_text().strip()
+                if any(pattern in text.lower() for pattern in time_patterns):
+                    print(f"Found completion time via keyword: {text}")
+                    solution_detail['assessment_length'] = text
+                    solution_detail['duration_minutes'] = extract_duration_minutes(text)
+                    assessment_found = True
+                    break
+        
+        # 3. Look specifically for time indications with minutes/hours
+        if not assessment_found:
+            time_regex = r'\b(\d+)\s*(minutes?|mins?|hours?|hrs?)\b'
+            for elem in soup.find_all(['p', 'div', 'li', 'span']):
+                text = elem.get_text().strip().lower()
+                match = re.search(time_regex, text, re.IGNORECASE)
+                if match and ('takes' in text or 'duration' in text or 'time' in text or 'complete' in text or 'approximately' in text):
+                    print(f"Found completion time via regex: {text}")
+                    solution_detail['assessment_length'] = text
+                    solution_detail['duration_minutes'] = extract_duration_minutes(text)
+                    assessment_found = True
+                    break
+        
+        # Extract test types - modified approach to not create test_type_details
+        # 1. Look for a section with "Test Type" header
+        test_types_found = False
+        for header in soup.find_all(['h1', 'h2', 'h3', 'h4', 'strong']):
+            if 'test type' in header.text.lower() or 'assessment type' in header.text.lower():
+                # Get all elements after this header that might contain test types
+                current_elem = header.find_next_sibling()
+                while current_elem and current_elem.name not in ['h1', 'h2', 'h3', 'h4']:
+                    text = current_elem.get_text().strip()
+                    
+                    # Check for test type codes (A, B, C, D, P, K, S)
+                    for test_type in ['A', 'B', 'C', 'D', 'P', 'K', 'S']:
+                        if (test_type + ' -' in text or 
+                            test_type + ':' in text or 
+                            f"{test_type} " in text or 
+                            f", {test_type}" in text or 
+                            f"; {test_type}" in text):
+                            if test_type not in solution_detail['test_type']:
+                                solution_detail['test_type'].append(test_type)
+                                solution_detail['test_type_names'].append(test_type_mapping.get(test_type, test_type))
+                    
+                    current_elem = current_elem.find_next_sibling()
+                
+                test_types_found = bool(solution_detail['test_type'])
+                break
+        
+        # 2. Check for test types mentioned anywhere in the document
+        if not test_types_found:
+            for elem in soup.find_all(['p', 'div', 'li', 'td']):
+                text = elem.get_text().strip()
                 for test_type in ['A', 'B', 'C', 'D', 'P', 'K', 'S']:
-                    if test_type in text and (test_type + ' -' in text or test_type + ':' in text):
+                    if (test_type + ' -' in text or 
+                        test_type + ':' in text or 
+                        f"{test_type} " in text or 
+                        f", {test_type}" in text or 
+                        f"; {test_type}" in text or
+                        test_type == text):
                         if test_type not in solution_detail['test_type']:
                             solution_detail['test_type'].append(test_type)
                             solution_detail['test_type_names'].append(test_type_mapping.get(test_type, test_type))
-                            # Get the description after the test type letter
-                            description = text.split(test_type + ' -', 1)[1].strip() if test_type + ' -' in text else ""
-                            if not description and test_type + ':' in text:
-                                description = text.split(test_type + ':', 1)[1].strip()
-                            
-                            solution_detail['test_type_details'][test_type] = {
-                                'name': test_type_mapping.get(test_type, test_type),
-                                'description': description
-                            }
         
-        # Check for Remote Testing using multiple approaches
-        # 1. Look for text containing "Remote Testing"
-        solution_detail['remote_testing'] = bool(soup.find(string=lambda s: s and 'remote testing' in s.lower()))
-        
-        # 2. Look for elements with specific classes that indicate remote testing
-        if not solution_detail['remote_testing']:
-            # Check for elements with "yes" in class name near "Remote Testing" text
-            remote_indicators = soup.find_all(class_=lambda c: c and ('yes' in c.lower() or 'circle' in c.lower() or 'check' in c.lower()))
-            for indicator in remote_indicators:
-                if indicator.parent and 'remote testing' in indicator.parent.text.lower():
+        # Check for Remote Testing indication 
+        for elem in soup.find_all(['p', 'div', 'li', 'span']):
+            text = elem.get_text().strip().lower()
+            if 'remote testing' in text or 'remote proctoring' in text or 'remote assessment' in text:
+                if 'supported' in text or 'available' in text or 'enabled' in text or 'yes' in text or '✓' in text:
                     solution_detail['remote_testing'] = True
                     break
         
-        # 3. Look for catalogue__circle with -yes class or similar indicators
-        if not solution_detail['remote_testing']:
-            remote_circles = soup.find_all(class_=lambda c: c and 'circle' in c.lower() and 'yes' in c.lower())
-            for circle in remote_circles:
-                parent_text = circle.parent.text.lower() if circle.parent else ""
-                if 'remote testing' in parent_text:
-                    solution_detail['remote_testing'] = True
-                    break
-        
-        # Check for Adaptive/IRT using multiple approaches
-        # 1. Look for text containing "adaptive" or "IRT"
-        solution_detail['adaptive_irt'] = bool(soup.find(string=lambda s: s and ('adaptive' in s.lower() or 'irt' in s.lower())))
-        
-        # 2. Look for elements with specific classes that indicate adaptive/IRT
-        if not solution_detail['adaptive_irt']:
-            # Check for elements with "yes" in class name near "Adaptive" or "IRT" text
-            adaptive_indicators = soup.find_all(class_=lambda c: c and ('yes' in c.lower() or 'circle' in c.lower() or 'check' in c.lower()))
-            for indicator in adaptive_indicators:
-                if indicator.parent and ('adaptive' in indicator.parent.text.lower() or 'irt' in indicator.parent.text.lower()):
+        # Check for Adaptive/IRT indication
+        for elem in soup.find_all(['p', 'div', 'li', 'span']):
+            text = elem.get_text().strip().lower()
+            if ('adaptive' in text or 'irt' in text or 'item response theory' in text) and 'testing' in text:
+                if 'supported' in text or 'available' in text or 'enabled' in text or 'yes' in text or '✓' in text:
                     solution_detail['adaptive_irt'] = True
                     break
-        
-        # 3. Look for catalogue__circle with -yes class or similar indicators
-        if not solution_detail['adaptive_irt']:
-            adaptive_circles = soup.find_all(class_=lambda c: c and 'circle' in c.lower() and 'yes' in c.lower())
-            for circle in adaptive_circles:
-                parent_text = circle.parent.text.lower() if circle.parent else ""
-                if 'adaptive' in parent_text or 'irt' in parent_text:
-                    solution_detail['adaptive_irt'] = True
-                    break
-        
-        # Clean up the test type details
-        for test_type in solution_detail['test_type_details']:
-            solution_detail['test_type_details'][test_type]['description'] = solution_detail['test_type_details'][test_type]['description'].strip()
-            # Ensure the test type name is set to the mapping
-            solution_detail['test_type_details'][test_type]['name'] = test_type_mapping.get(test_type, 
-                solution_detail['test_type_details'][test_type]['name'])
-        
-        # Clean up lists
-        solution_detail['job_levels'] = [jl for jl in solution_detail['job_levels'] if jl]
-        solution_detail['languages'] = [l for l in solution_detail['languages'] if l]
+                    
+        # Ensure we have default values for required fields
+        # Ensure job_levels has at least one value
+        if not solution_detail['job_levels']:
+            solution_detail['job_levels'] = ["Mid-Professional"]  # Default
+            
+        # Ensure languages has at least one value
+        if not solution_detail['languages']:
+            solution_detail['languages'] = ["English (USA)"]  # Default
+            
+        # Log findings
+        print(f"Extracted details for {url}:")
+        print(f"  - Description: {len(solution_detail['description'])} chars")
+        print(f"  - Assessment Length: {solution_detail['assessment_length']}")
+        print(f"  - Duration Minutes: {solution_detail['duration_minutes']}")
+        print(f"  - Test Types: {solution_detail['test_type']}")
+        print(f"  - Remote Testing: {solution_detail['remote_testing']}")
         
     except Exception as e:
         print(f"Error parsing solution details: {e}")
+        traceback.print_exc()
     
-    print(f"Extracted details: {', '.join(solution_detail.keys())}")
     return solution_detail
 
 def load_existing_solutions(type_name):
@@ -494,6 +609,9 @@ def scrape_shl_catalog():
             page_solutions = parse_catalog_page(soup, 'packaged')
             if page_solutions:
                 print(f"Found {len(page_solutions)} packaged solutions on page")
+                # Label each solution with its type
+                for solution in page_solutions:
+                    solution['category'] = 'Pre-packaged Job Solutions'
                 # Add the new solutions and remove duplicates
                 packaged_solutions = merge_solutions(packaged_solutions, page_solutions)
                 # Save progress after each page
@@ -516,6 +634,9 @@ def scrape_shl_catalog():
             page_solutions = parse_catalog_page(soup, 'individual')
             if page_solutions:
                 print(f"Found {len(page_solutions)} individual solutions on page")
+                # Label each solution with its type
+                for solution in page_solutions:
+                    solution['category'] = 'Individual Test Solutions'
                 # Add the new solutions and remove duplicates
                 individual_solutions = merge_solutions(individual_solutions, page_solutions)
                 # Save progress after each page
@@ -529,62 +650,81 @@ def scrape_shl_catalog():
             print(f"Error processing {url}: {e}")
             # Continue with next URL
     
-    # If we have solutions, add detail information for each
-    if packaged_solutions or individual_solutions:
-        # First, process solutions that don't have details yet
-        print("\nScraping details for solutions without details...")
-        
-        # Process packaged solutions
-        solutions_to_process = [s for s in packaged_solutions if 'description' not in s]
-        for i, solution in enumerate(solutions_to_process):
-            try:
-                print(f"\nScraping details for {solution['name']} ({i+1}/{len(solutions_to_process)})")
-                details = parse_solution_details(solution['url'])
-                solution.update(details)
-                # Save progress periodically
-                if (i + 1) % 10 == 0:
-                    save_to_json(packaged_solutions, 'data/packaged_solutions.json')
-                    save_to_mongodb(packaged_solutions, MONGO_COLLECTION_PACKAGED)
-                # Be nice to the server
-                time.sleep(2)  # Increased delay to avoid rate limiting
-            except Exception as e:
-                print(f"Error getting details for {solution['name']}: {e}")
-                # Continue with next solution
-        
-        # Save final results for packaged solutions
-        save_to_json(packaged_solutions, 'data/packaged_solutions.json')
-        save_to_mongodb(packaged_solutions, MONGO_COLLECTION_PACKAGED)
-        
-        # Process individual solutions
-        solutions_to_process = [s for s in individual_solutions if 'description' not in s]
-        for i, solution in enumerate(solutions_to_process):
-            try:
-                print(f"\nScraping details for {solution['name']} ({i+1}/{len(solutions_to_process)})")
-                details = parse_solution_details(solution['url'])
-                solution.update(details)
-                # Save progress periodically
-                if (i + 1) % 10 == 0:
-                    save_to_json(individual_solutions, 'data/individual_solutions.json')
-                    save_to_mongodb(individual_solutions, MONGO_COLLECTION_INDIVIDUAL)
-                # Be nice to the server
-                time.sleep(2)  # Increased delay to avoid rate limiting
-            except Exception as e:
-                print(f"Error getting details for {solution['name']}: {e}")
-                # Continue with next solution
-        
-        # Save final results for individual solutions
-        save_to_json(individual_solutions, 'data/individual_solutions.json')
-        save_to_mongodb(individual_solutions, MONGO_COLLECTION_INDIVIDUAL)
-        
-        print(f"\nScraped {len(packaged_solutions)} packaged solutions and {len(individual_solutions)} individual solutions")
-        
-        # Also merge and save as the original format for compatibility
-        all_solutions = packaged_solutions + individual_solutions
-        processed_df = preprocess_assessments(all_solutions)
-        save_to_json(processed_df, 'data/shl_assessments.json')
-        save_to_mongodb(processed_df.to_dict('records'), MONGO_COLLECTION)
-    else:
-        print("No solutions found. Check if the website structure has changed.")
+    # Always scrape details for all solutions, even if they have some details already
+    # as the duration_minutes might be missing
+    print("\nScraping detailed information for all solutions...")
+    
+    # Process packaged solutions first
+    print(f"\nProcessing {len(packaged_solutions)} packaged solutions...")
+    for i, solution in enumerate(packaged_solutions):
+        try:
+            print(f"\nScraping details for {solution['name']} ({i+1}/{len(packaged_solutions)})")
+            details = parse_solution_details(solution['url'])
+            
+            # Update existing details with new information
+            for key, value in details.items():
+                # For non-empty values, replace existing data
+                if value or key not in solution:
+                    solution[key] = value
+                    
+            # Ensure we have category and solution_type
+            solution['category'] = 'Pre-packaged Job Solutions'
+            solution['solution_type'] = 'packaged'
+            
+            # Save progress periodically
+            if (i + 1) % 5 == 0:
+                save_to_json(packaged_solutions, 'data/packaged_solutions.json')
+                save_to_mongodb(packaged_solutions, MONGO_COLLECTION_PACKAGED)
+            
+            # Be nice to the server
+            time.sleep(2)
+        except Exception as e:
+            print(f"Error getting details for {solution['name']}: {e}")
+            # Continue with next solution
+    
+    # Save final results for packaged solutions
+    save_to_json(packaged_solutions, 'data/packaged_solutions.json')
+    save_to_mongodb(packaged_solutions, MONGO_COLLECTION_PACKAGED)
+    
+    # Process individual solutions
+    print(f"\nProcessing {len(individual_solutions)} individual solutions...")
+    for i, solution in enumerate(individual_solutions):
+        try:
+            print(f"\nScraping details for {solution['name']} ({i+1}/{len(individual_solutions)})")
+            details = parse_solution_details(solution['url'])
+            
+            # Update existing details with new information
+            for key, value in details.items():
+                # For non-empty values, replace existing data
+                if value or key not in solution:
+                    solution[key] = value
+            
+            # Ensure we have category and solution_type
+            solution['category'] = 'Individual Test Solutions'
+            solution['solution_type'] = 'individual'
+            
+            # Save progress periodically
+            if (i + 1) % 5 == 0:
+                save_to_json(individual_solutions, 'data/individual_solutions.json')
+                save_to_mongodb(individual_solutions, MONGO_COLLECTION_INDIVIDUAL)
+            
+            # Be nice to the server
+            time.sleep(2)
+        except Exception as e:
+            print(f"Error getting details for {solution['name']}: {e}")
+            # Continue with next solution
+    
+    # Save final results for individual solutions
+    save_to_json(individual_solutions, 'data/individual_solutions.json')
+    save_to_mongodb(individual_solutions, MONGO_COLLECTION_INDIVIDUAL)
+    
+    print(f"\nScraped {len(packaged_solutions)} packaged solutions and {len(individual_solutions)} individual solutions")
+    
+    # Also merge and save as the original format for compatibility
+    all_solutions = packaged_solutions + individual_solutions
+    processed_df = preprocess_assessments(all_solutions)
+    save_to_json(processed_df.to_dict('records'), 'data/shl_assessments.json')
+    save_to_mongodb(processed_df.to_dict('records'), MONGO_COLLECTION)
     
     return {
         'packaged': packaged_solutions,
@@ -593,23 +733,26 @@ def scrape_shl_catalog():
 
 def preprocess_assessments(assessments):
     """Clean and preprocess assessment data."""
+    # First, ensure all records have consistent fields
+    for solution in assessments:
+        # Ensure all required fields exist
+        solution.setdefault('description', '')
+        solution.setdefault('remote_testing', False)
+        solution.setdefault('adaptive_irt', False)
+        solution.setdefault('job_levels', [])
+        solution.setdefault('languages', [])
+        solution.setdefault('test_type', [])
+        solution.setdefault('test_type_names', [])
+        solution.setdefault('assessment_length', '')
+        
+        # Remove empty test_type_details as requested
+        if 'test_type_details' in solution:
+            del solution['test_type_details']
+    
+    # Create DataFrame
     df = pd.DataFrame(assessments)
     
-    # Fill NA values properly based on data type
-    for col in df.columns:
-        if col == 'description':
-            df[col] = df[col].fillna('')
-        elif col in ['remote_testing', 'adaptive_irt']:
-            df[col] = df[col].fillna(False)
-        elif col in ['job_levels', 'languages', 'test_type']:
-            # For list columns, replace NA with empty list
-            df[col] = df[col].apply(lambda x: x if isinstance(x, list) else [])
-    
-    # Convert duration to minutes if not already present
-    if 'duration_minutes' not in df.columns and 'assessment_length' in df.columns:
-        df['duration_minutes'] = df['assessment_length'].apply(lambda x: extract_duration_minutes(x) if x else None)
-    
-    # Map test type letters to names
+    # Map test type letters to names if not already mapped
     test_type_mapping = {
         'A': 'Ability & Aptitude',
         'B': 'Biodata & Situational Judgement',
@@ -620,10 +763,22 @@ def preprocess_assessments(assessments):
         'S': 'Personality & Behavior'
     }
     
-    # Create a new column with mapped test type names
+    # Create or update test_type_names with properly mapped values
     df['test_type_names'] = df['test_type'].apply(
         lambda types: [test_type_mapping.get(t, t) for t in types] if isinstance(types, list) else []
     )
+    
+    # Ensure proper types for all columns
+    df['description'] = df['description'].fillna('').astype(str)
+    df['remote_testing'] = df['remote_testing'].fillna(False).astype(bool)
+    df['adaptive_irt'] = df['adaptive_irt'].fillna(False).astype(bool)
+    
+    # Handle list columns
+    for col in ['job_levels', 'languages', 'test_type', 'test_type_names']:
+        df[col] = df[col].apply(lambda x: x if isinstance(x, list) else [])
+    
+    # Extract duration in minutes from assessment_length
+    df['duration_minutes'] = df['assessment_length'].apply(extract_duration_minutes)
     
     # Create text for embedding
     df['text_for_embedding'] = df.apply(
@@ -639,28 +794,93 @@ def preprocess_assessments(assessments):
 
 def extract_duration_minutes(duration_text):
     """Extract numerical duration in minutes from text."""
-    if not duration_text:
+    if not duration_text or not isinstance(duration_text, str):
         return None
         
     try:
         duration_text = duration_text.lower()
-        if 'minute' in duration_text:
-            numbers = [int(s) for s in duration_text.split() if s.isdigit()]
-            if numbers:
-                return numbers[0]
-            if '-' in duration_text:
-                parts = duration_text.split('-')
-                if len(parts) == 2:
-                    start = ''.join(c for c in parts[0] if c.isdigit())
-                    end = ''.join(c for c in parts[1] if c.isdigit())
-                    if start and end:
-                        return (int(start) + int(end)) / 2
+        
+        # Direct pattern matching for "Approximate Completion Time in minutes = X"
+        if 'completion time in minutes =' in duration_text:
+            parts = duration_text.split('=')
+            if len(parts) >= 2:
+                minutes_str = parts[1].strip()
+                minutes = ''.join(c for c in minutes_str if c.isdigit())
+                if minutes:
+                    return int(minutes)
+        
+        # Try with regex for same pattern
+        completion_time_match = re.search(r'completion time in minutes\s*=\s*(\d+)', duration_text, re.IGNORECASE)
+        if completion_time_match:
+            return int(completion_time_match.group(1))
+            
+        # Also match "Approximate Completion Time: X minutes"
+        completion_time_match2 = re.search(r'completion time:?\s*(\d+)\s*minutes?', duration_text, re.IGNORECASE)
+        if completion_time_match2:
+            return int(completion_time_match2.group(1))
+        
+        # Extract numbers followed by "minute" or "min"
+        minute_pattern = r'(\d+)\s*(?:minute|min)'
+        minute_matches = re.findall(minute_pattern, duration_text)
+        if minute_matches:
+            return int(minute_matches[0])
+        
+        # Handle ranges like "15-20 minutes"
+        range_pattern = r'(\d+)\s*-\s*(\d+)\s*(?:minute|min)'
+        range_match = re.search(range_pattern, duration_text)
+        if range_match:
+            start = int(range_match.group(1))
+            end = int(range_match.group(2))
+            return (start + end) // 2  # Average of range
+        
+        # Handle hours and convert to minutes
         if 'hour' in duration_text:
-            numbers = [int(s) for s in duration_text.split() if s.isdigit()]
-            if numbers:
-                return numbers[0] * 60
-    except:
-        pass
+            # Look for "X hour(s) Y minute(s)" pattern
+            hours_pattern = r'(\d+)\s*hour'
+            minutes_pattern = r'(\d+)\s*minute'
+            
+            hours_match = re.search(hours_pattern, duration_text)
+            minutes_match = re.search(minutes_pattern, duration_text)
+            
+            total_minutes = 0
+            if hours_match:
+                total_minutes += int(hours_match.group(1)) * 60
+            if minutes_match:
+                total_minutes += int(minutes_match.group(1))
+                
+            if total_minutes > 0:
+                return total_minutes
+            
+            # Just hours with no minutes specified
+            hours_only = re.findall(r'(\d+)\s*hour', duration_text)
+            if hours_only:
+                return int(hours_only[0]) * 60
+        
+        # Look for any digits followed by min/minutes or preceded by timing words
+        timing_words = ['approximately', 'about', 'around', 'takes', 'duration', 'time to complete']
+        for word in timing_words:
+            if word in duration_text:
+                # Find a number after this word
+                pattern = rf'{word}\s+(\d+)'
+                match = re.search(pattern, duration_text)
+                if match:
+                    return int(match.group(1))
+                
+                # Try reverse - number before "minutes" after the timing word
+                idx = duration_text.find(word)
+                if idx >= 0:
+                    rest = duration_text[idx:]
+                    num_match = re.search(r'(\d+)\s*min', rest)
+                    if num_match:
+                        return int(num_match.group(1))
+        
+        # Last resort - extract any digits from the text that might be related to time
+        digits = re.findall(r'\d+', duration_text)
+        if digits and ('time' in duration_text or 'duration' in duration_text or 'minutes' in duration_text):
+            return int(digits[0])
+            
+    except Exception as e:
+        print(f"Error extracting duration from '{duration_text}': {e}")
     
     return None
 

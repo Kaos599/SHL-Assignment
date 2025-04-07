@@ -32,3 +32,12 @@ build/
 *.launch
 *.externalToolBuilders/
 *.buildpath
+
+
+
+data/
+data/individual_solutions.json
+data/packaged_solutions.json
+data/shl_assessments.json
+data/shl_assessments_solutions.json
+data/individual_solutions.json
