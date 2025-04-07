@@ -1,0 +1,162 @@
+[
+    {
+        "name":"Global Skills Development Report",
+        "url":"https:\/\/www.shl.com\/products\/global-skills-development-report\/",
+        "remote_testing":"Yes",
+        "adaptive_irt":"No",
+        "test_type":"A B C D E",
+        "duration":"45 minutes",
+        "duration_minutes":45,
+        "text_for_embedding":"Global Skills Development Report A B C D E Duration: 45 minutes Remote Testing: Yes Adaptive: No"
+    },
+    {
+        "name":".NET Framework 4.5",
+        "url":"https:\/\/www.shl.com\/products\/net-framework-45\/",
+        "remote_testing":"Yes",
+        "adaptive_irt":"Yes",
+        "test_type":"K",
+        "duration":"60 minutes",
+        "duration_minutes":60,
+        "text_for_embedding":".NET Framework 4.5 K Duration: 60 minutes Remote Testing: Yes Adaptive: Yes"
+    },
+    {
+        "name":".NET MVC",
+        "url":"https:\/\/www.shl.com\/products\/net-mvc\/",
+        "remote_testing":"Yes",
+        "adaptive_irt":"No",
+        "test_type":"K",
+        "duration":"60 minutes",
+        "duration_minutes":60,
+        "text_for_embedding":".NET MVC K Duration: 60 minutes Remote Testing: Yes Adaptive: No"
+    },
+    {
+        "name":".NET MVVM",
+        "url":"https:\/\/www.shl.com\/products\/net-mvvm\/",
+        "remote_testing":"Yes",
+        "adaptive_irt":"No",
+        "test_type":"K",
+        "duration":"60 minutes",
+        "duration_minutes":60,
+        "text_for_embedding":".NET MVVM K Duration: 60 minutes Remote Testing: Yes Adaptive: No"
+    },
+    {
+        "name":".NET WCF",
+        "url":"https:\/\/www.shl.com\/products\/net-wcf\/",
+        "remote_testing":"Yes",
+        "adaptive_irt":"No",
+        "test_type":"K",
+        "duration":"50 minutes",
+        "duration_minutes":50,
+        "text_for_embedding":".NET WCF K Duration: 50 minutes Remote Testing: Yes Adaptive: No"
+    },
+    {
+        "name":".NET WPF",
+        "url":"https:\/\/www.shl.com\/products\/net-wpf\/",
+        "remote_testing":"Yes",
+        "adaptive_irt":"No",
+        "test_type":"K",
+        "duration":"50 minutes",
+        "duration_minutes":50,
+        "text_for_embedding":".NET WPF K Duration: 50 minutes Remote Testing: Yes Adaptive: No"
+    },
+    {
+        "name":".NET XAML",
+        "url":"https:\/\/www.shl.com\/products\/net-xaml\/",
+        "remote_testing":"Yes",
+        "adaptive_irt":"No",
+        "test_type":"K",
+        "duration":"50 minutes",
+        "duration_minutes":50,
+        "text_for_embedding":".NET XAML K Duration: 50 minutes Remote Testing: Yes Adaptive: No"
+    },
+    {
+        "name":"Account Manager Solution",
+        "url":"https:\/\/www.shl.com\/products\/account-manager-solution\/",
+        "remote_testing":"Yes",
+        "adaptive_irt":"Yes",
+        "test_type":"C D A B",
+        "duration":"90 minutes",
+        "duration_minutes":90,
+        "text_for_embedding":"Account Manager Solution C D A B Duration: 90 minutes Remote Testing: Yes Adaptive: Yes"
+    },
+    {
+        "name":"Administrative Professional - Short Form",
+        "url":"https:\/\/www.shl.com\/products\/administrative-professional-short-form\/",
+        "remote_testing":"Yes",
+        "adaptive_irt":"Yes",
+        "test_type":"A K D",
+        "duration":"45 minutes",
+        "duration_minutes":45,
+        "text_for_embedding":"Administrative Professional - Short Form A K D Duration: 45 minutes Remote Testing: Yes Adaptive: Yes"
+    },
+    {
+        "name":"Agency Manager Solution",
+        "url":"https:\/\/www.shl.com\/products\/agency-manager-solution\/",
+        "remote_testing":"Yes",
+        "adaptive_irt":"Yes",
+        "test_type":"A B D S",
+        "duration":"90 minutes",
+        "duration_minutes":90,
+        "text_for_embedding":"Agency Manager Solution A B D S Duration: 90 minutes Remote Testing: Yes Adaptive: Yes"
+    },
+    {
+        "name":"Apprentice + 8.0 Job Focused Assessment",
+        "url":"https:\/\/www.shl.com\/products\/apprentice-plus-job-focused-assessment\/",
+        "remote_testing":"Yes",
+        "adaptive_irt":"No",
+        "test_type":"B P",
+        "duration":"40 minutes",
+        "duration_minutes":40,
+        "text_for_embedding":"Apprentice + 8.0 Job Focused Assessment B P Duration: 40 minutes Remote Testing: Yes Adaptive: No"
+    },
+    {
+        "name":"Apprentice 8.0 Job Focused Assessment",
+        "url":"https:\/\/www.shl.com\/products\/apprentice-job-focused-assessment\/",
+        "remote_testing":"Yes",
+        "adaptive_irt":"No",
+        "test_type":"B P",
+        "duration":"40 minutes",
+        "duration_minutes":40,
+        "text_for_embedding":"Apprentice 8.0 Job Focused Assessment B P Duration: 40 minutes Remote Testing: Yes Adaptive: No"
+    },
+    {
+        "name":"Bank Administrative Assistant - Short Form",
+        "url":"https:\/\/www.shl.com\/products\/bank-administrative-assistant-short-form\/",
+        "remote_testing":"Yes",
+        "adaptive_irt":"No",
+        "test_type":"A B K P",
+        "duration":"30 minutes",
+        "duration_minutes":30,
+        "text_for_embedding":"Bank Administrative Assistant - Short Form A B K P Duration: 30 minutes Remote Testing: Yes Adaptive: No"
+    },
+    {
+        "name":"Bank Collections Agent - Short Form",
+        "url":"https:\/\/www.shl.com\/products\/bank-collections-agent-short-form\/",
+        "remote_testing":"Yes",
+        "adaptive_irt":"No",
+        "test_type":"A B D",
+        "duration":"35 minutes",
+        "duration_minutes":35,
+        "text_for_embedding":"Bank Collections Agent - Short Form A B D Duration: 35 minutes Remote Testing: Yes Adaptive: No"
+    },
+    {
+        "name":"Bank Operations Supervisor - Short Form",
+        "url":"https:\/\/www.shl.com\/products\/bank-operations-supervisor-short-form\/",
+        "remote_testing":"Yes",
+        "adaptive_irt":"Yes",
+        "test_type":"A B D S",
+        "duration":"40 minutes",
+        "duration_minutes":40,
+        "text_for_embedding":"Bank Operations Supervisor - Short Form A B D S Duration: 40 minutes Remote Testing: Yes Adaptive: Yes"
+    },
+    {
+        "name":"Bilingual Spanish Reservation Agent Solution",
+        "url":"https:\/\/www.shl.com\/products\/bilingual-spanish-reservation-agent\/",
+        "remote_testing":"Yes",
+        "adaptive_irt":"Yes",
+        "test_type":"B D S A",
+        "duration":"60 minutes",
+        "duration_minutes":60,
+        "text_for_embedding":"Bilingual Spanish Reservation Agent Solution B D S A Duration: 60 minutes Remote Testing: Yes Adaptive: Yes"
+    }
+]
