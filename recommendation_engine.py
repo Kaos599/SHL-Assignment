@@ -14,7 +14,7 @@ from pymongo import MongoClient
 import logging
 import traceback
 import google.generativeai as google_genai
-from embedding_storage import EmbeddingStorage  # Import our new EmbeddingStorage class
+from embedding_storage import EmbeddingStorage  
 
 # Load environment variables
 load_dotenv()

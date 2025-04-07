@@ -295,9 +295,8 @@ def main():
     # Initialize Gemini embedding storage
     embedding_storage = GeminiEmbeddingStorage()
     
-    # Load data from collections
-    # Process all documents by not specifying a limit
-    test_limit = None  # Process all documents
+    
+    test_limit = None  
     
     # Define chunk sizes for different collections
     packaged_chunk_size = 50

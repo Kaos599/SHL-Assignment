@@ -32,8 +32,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# DO NOT initialize the recommendation engine at startup
-# Instead, create it lazily when needed to avoid connecting to external APIs at startup
+
 recommendation_engine = None
 
 def get_recommendation_engine():
