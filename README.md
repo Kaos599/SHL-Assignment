@@ -1,133 +1,105 @@
 # SHL Assessment Recommendation System
 
-## Project Overview
-An intelligent recommendation system that helps hiring managers find the most relevant SHL assessments for their job openings. The system takes natural language queries or job descriptions as input and returns appropriate SHL assessments from the SHL product catalog.
+This system helps HR professionals and hiring managers find the most relevant SHL assessments for their job requirements by using advanced natural language processing and vector similarity search.
 
 ## Features
 
-- **Natural Language Input**: Processes queries about job requirements and needed assessment types
-- **Multi-source Input**: Accepts text queries, job descriptions, or URLs to job postings
-- **Smart Filtering**: Filters results based on constraints like time limits
-- **Comprehensive Results**: Returns up to 10 relevant assessments with complete details
+- **Natural Language Query Processing**: Interprets job descriptions and requirements in natural language
+- **Google Gemini-powered Embeddings**: Uses Gemini embeddings for semantic search capabilities
+- **MongoDB Integration**: Stores assessment data and embeddings for efficient retrieval
+- **Gemini Pro Integration**: Provides natural language explanations of recommendations
+- **Duration Filtering**: Automatically filters assessments by duration constraints mentioned in the query
+- **URL Integration**: Can extract and process job descriptions from URLs
 
-## Technical Implementation
+## Architecture
 
-### System Architecture
+The system now operates with a streamlined, Google Gemini-powered architecture:
 
-The system is built with a hybrid architecture combining:
+1. **Data Collection**: Assessments are collected via web scraping and stored in MongoDB
+2. **Gemini Embeddings**: Embeddings are created using Google's Gemini embedding model
+3. **Streamlit Frontend**: Connects directly to MongoDB for data and embeddings
+4. **Vector Search**: FAISS is used for efficient similarity search
+5. **Gemini Pro Integration**: Generates natural language responses about recommendations
 
-1. **Data Collection Pipeline**: Web scraping for SHL product data
-2. **Vector Database**: FAISS for semantic search
-3. **API Backend**: FastAPI
-4. **Web Interface**: Streamlit frontend
-
-### Components
-
-- **Data Collection (`data_collection.py`)**: Scrapes SHL product catalog 
-- **Embedding Generation (`embedding.py`)**: Creates embeddings
-- **Recommendation Engine (`recommendation_engine.py`)**: Core matching logic
-- **API (`app.py`)**: REST API endpoints
-- **Web UI (`streamlit_app.py`)**: User interface
-- **Evaluation Framework (`evaluate.py`)**: Test framework for measuring performance
-
-## Vector Search Benefits
-
-- **Semantic Understanding**: Captures meaning beyond keyword matching
-- **Multilingual Support**: Works across languages through semantic understanding
-- **Relevance Ranking**: Orders results by semantic similarity score
-- **Efficient Retrieval**: Fast search even with large assessment databases
-
-## Running the System
+## Setup Instructions
 
 ### Prerequisites
 
-- Python 3.9+
-- MongoDB for data storage
+- Python 3.8+
+- MongoDB instance (can be local or cloud-based)
+- Google API key for Gemini Pro and Gemini embeddings
 
-### Environment Setup
+### Environment Variables
 
-1. Create a virtual environment:
-```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
+Create a `.env` file with the following variables:
 
-2. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
-
-3. Configure environment variables in `.env`:
 ```
 # MongoDB Connection
-MONGO_URI="your-mongodb-connection-string"
-MONGO_DB="SHL"
-MONGO_COLLECTION_PACKAGED="packaged_solutions"
-MONGO_COLLECTION_INDIVIDUAL="individual_solutions"
+MONGO_URI=mongodb://username:password@localhost:27017
+MONGO_DB=SHL
+MONGO_COLLECTION_PACKAGED=packaged_solutions
+MONGO_COLLECTION_INDIVIDUAL=individual_solutions
+MONGO_EMBEDDINGS_COLLECTION=embeddings
+
+# Google API (for Gemini)
+GOOGLE_API_KEY=your_google_api_key
 ```
 
-### Running the System
+### Installation
 
-1. Generate embeddings:
-```bash
-python embedding.py
-```
+1. Clone the repository
+   ```
+   git clone https://github.com/yourusername/shl-assessment-recommendation.git
+   cd shl-assessment-recommendation
+   ```
 
-2. Start the API:
-```bash
-python app.py
-```
+2. Install dependencies
+   ```
+   pip install -r requirements.txt
+   ```
 
-3. Launch the web interface:
-```bash
-streamlit run streamlit_app.py
-```
+3. Run the Streamlit app
+   ```
+   streamlit run streamlit_app.py
+   ```
 
-## Evaluation
+## Data Collection and Embedding Creation
 
-The system performance can be evaluated using:
+These steps are not required for normal operation, only for initial setup or updates:
 
-```bash
-python evaluate.py
-```
+1. Collect assessment data:
+   ```
+   python data_collection.py
+   ```
 
-This calculates:
-- Mean Recall@K (K=1,3,5,10)
-- Mean Average Precision@K (MAP@K)
+2. Create embeddings using Gemini:
+   ```
+   python create_embeddings.py
+   ```
+
+## Usage
+
+1. Open the Streamlit app in your browser (typically at http://localhost:8501)
+2. Enter a job description or requirements in the text field
+3. Optionally provide a URL to a job posting
+4. Click "Get Recommendations"
+5. View the recommendations and explanations
 
 ## Example Queries
 
-Try these sample queries:
-
-1. "I am hiring for Java developers who can also collaborate effectively with my business teams. Looking for an assessment(s) that can be completed in 40 minutes."
-
-2. "Looking to hire mid-level professionals who are proficient in Python, SQL and JavaScript. Need an assessment package that can test all skills with max duration of 60 minutes."
-
-3. "I am hiring for an analyst and want to screen applications using Cognitive and personality tests. What options are available within 45 minutes?"
+- "I need an assessment for Java developers with strong team collaboration skills"
+- "Looking for a coding assessment for Python and SQL that takes less than 60 minutes"
+- "Need a cognitive assessment for a data analyst position that tests numerical reasoning"
 
 ## Project Structure
 
-```
-shl-recommender/
-├── app.py                      # FastAPI backend
-├── data_collection.py          # Web scraping
-├── embedding.py                # Vector embeddings
-├── evaluate.py                 # Evaluation metrics
-├── recommendation_engine.py    # Core engine
-├── streamlit_app.py            # Web interface
-├── requirements.txt            # Dependencies
-├── design_document.md          # Approach explanation
-├── README.md                   # Instructions
-├── .env                        # Configuration
-└── data/                       # Generated data
-    ├── shl_assessments.json
-    ├── embedding_model.pkl
-    ├── assessment_index.faiss
-```
+- `streamlit_app.py`: The main Streamlit application
+- `create_embeddings.py`: Script for creating and storing embeddings using Google Gemini
+- `data_collection.py`: Scripts for collecting assessment data
 
 ## License
 
-MIT
+This project is licensed under the MIT License - see the LICENSE file for details.
 
 ## Acknowledgements
 

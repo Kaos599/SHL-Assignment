@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl
 from typing import Optional, List, Dict, Any, Union
@@ -6,6 +6,12 @@ import uvicorn
 from recommendation_engine import SHLRecommendationEngine
 import os
 from dotenv import load_dotenv
+import logging
+import traceback
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -26,8 +32,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize the recommendation engine
-recommendation_engine = SHLRecommendationEngine()
+# DO NOT initialize the recommendation engine at startup
+# Instead, create it lazily when needed to avoid connecting to external APIs at startup
+recommendation_engine = None
+
+def get_recommendation_engine():
+    """Get or create the recommendation engine lazily."""
+    global recommendation_engine
+    if recommendation_engine is None:
+        try:
+            logger.info("Initializing recommendation engine...")
+            recommendation_engine = SHLRecommendationEngine(skip_embedding_creation=True)
+            logger.info("Recommendation engine initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize recommendation engine: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise RuntimeError(f"Failed to initialize recommendation engine: {str(e)}")
+    return recommendation_engine
 
 # Define request and response models
 class RecommendationRequest(BaseModel):
@@ -40,12 +61,25 @@ class RecommendationResponse(BaseModel):
     enhanced_query: Optional[str] = None
     recommendations: List[Dict[str, Any]]
     duration_constraint: Optional[int] = None
+    natural_language_response: Optional[str] = None
 
 # Root route
 @app.get("/", tags=["General"])
 async def root():
     """Root endpoint to check if API is running"""
     return {"message": "SHL Assessment Recommendation API is running"}
+
+# Middleware to log request details
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    logger.info(f"Request path: {request.url.path}")
+    try:
+        response = await call_next(request)
+        return response
+    except Exception as e:
+        logger.error(f"Request failed: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise
 
 # GET endpoint for recommendations
 @app.get("/recommend", tags=["Recommendations"], response_model=RecommendationResponse)
@@ -59,20 +93,32 @@ async def get_recommendations(
     Optionally provide a URL to a job posting for additional context.
     """
     try:
-        # Get recommendations
-        recommendations = recommendation_engine.recommend(query, url, max_results)
+        logger.info(f"Processing recommendation request with query: {query}")
+        
+        # Get recommendations using lazy-loaded engine
+        engine = get_recommendation_engine()
+        recommendations = engine.recommend(query, url, max_results)
+        logger.info(f"Generated {len(recommendations)} recommendations")
         
         # Extract the enhanced query if available
         enhanced_query = None
-        duration_constraint = recommendation_engine.extract_duration_constraint(query)
+        duration_constraint = engine.extract_duration_constraint(query)
+        
+        # Generate natural language response using Gemini
+        natural_language_response = engine.generate_natural_language_response(
+            query, recommendations, duration_constraint
+        )
         
         return {
             "query": query,
             "enhanced_query": enhanced_query,
             "recommendations": recommendations,
-            "duration_constraint": duration_constraint
+            "duration_constraint": duration_constraint,
+            "natural_language_response": natural_language_response
         }
     except Exception as e:
+        logger.error(f"Error generating recommendations: {str(e)}")
+        logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Error generating recommendations: {str(e)}")
 
 # POST endpoint for recommendations
@@ -83,34 +129,43 @@ async def post_recommendations(request: RecommendationRequest):
     Provide a natural language query or job description, and optionally a URL to a job posting.
     """
     try:
-        # Get recommendations
-        recommendations = recommendation_engine.recommend(
+        logger.info(f"Processing POST recommendation request with query: {request.query}")
+        
+        # Get recommendations using lazy-loaded engine
+        engine = get_recommendation_engine()
+        recommendations = engine.recommend(
             request.query, 
             str(request.url) if request.url else None, 
             request.max_results
         )
+        logger.info(f"Generated {len(recommendations)} recommendations")
         
         # Extract the enhanced query if available
         enhanced_query = None
-        duration_constraint = recommendation_engine.extract_duration_constraint(request.query)
+        duration_constraint = engine.extract_duration_constraint(request.query)
+        
+        # Generate natural language response using Gemini
+        natural_language_response = engine.generate_natural_language_response(
+            request.query, recommendations, duration_constraint
+        )
         
         return {
             "query": request.query,
             "enhanced_query": enhanced_query,
             "recommendations": recommendations,
-            "duration_constraint": duration_constraint
+            "duration_constraint": duration_constraint,
+            "natural_language_response": natural_language_response
         }
     except Exception as e:
+        logger.error(f"Error generating recommendations: {str(e)}")
+        logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Error generating recommendations: {str(e)}")
 
-@app.get("/health", tags=["Health"])
-async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy"}
 
 if __name__ == "__main__":
     # Get port from environment variable or use default
     port = int(os.getenv("PORT", 8000))
     
     # Run the FastAPI app
+    logger.info(f"Starting FastAPI server on port {port}")
     uvicorn.run("app:app", host="0.0.0.0", port=port, reload=True)

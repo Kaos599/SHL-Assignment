@@ -1,237 +1,177 @@
 import os
-import pandas as pd
-import numpy as np
 import time
+import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from dotenv import load_dotenv
-from openai import AzureOpenAI
-from sentence_transformers import SentenceTransformer
-import faiss
-import json
+import numpy as np
 import logging
-
-# Configure logging
-logging.basicConfig(level=logging.INFO, 
-                    format='%(asctime)s - %(levelname)s - %(message)s',
-                    handlers=[logging.StreamHandler()])
-logger = logging.getLogger(__name__)
+from sentence_transformers import SentenceTransformer
+import google.generativeai as google_genai
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 # Load environment variables
 load_dotenv()
 
-# Azure OpenAI connection
-AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
-AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
-AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION")
-AZURE_EMBEDDING_DEPLOYMENT_NAME = os.getenv("AZURE_EMBEDDING_DEPLOYMENT_NAME", "text-embedding-ada-002")
+# Configure logging
+logging.basicConfig(level=logging.INFO, 
+                    format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-def load_test_data(sample_count=10):
-    """Load or create test data for benchmarking."""
-    # Sample test queries
-    test_queries = [
-        "Java developers who can collaborate with business teams",
-        "Python, SQL and JavaScript programmers for mid-level roles",
-        "Hiring analysts with cognitive and personality assessment needs",
-        "Customer service representatives with interpersonal skills",
-        "Leadership assessment for executive candidates",
-        "Technical skills assessment for software engineers",
-        "Sales team assessment with focus on negotiation skills",
-        "Project managers with agile methodology expertise",
-        "Data scientists with machine learning knowledge",
-        "Financial analysts with attention to detail",
-        "HR professionals with conflict resolution abilities",
-        "Marketing specialists with creativity assessment",
-        "DevOps engineers with automation skills",
-        "Product managers with strategic thinking",
-        "UX designers with user empathy"
-    ]
-    
-    # Take the number of queries requested, or all if sample_count > len(test_queries)
-    return test_queries[:min(sample_count, len(test_queries))]
+# Google API key
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+google_genai.configure(api_key=GOOGLE_API_KEY)
 
-def get_azure_openai_client():
-    """Initialize and return Azure OpenAI client."""
+def get_sentence_transformer_model(model_name="all-MiniLM-L6-v2"):
+    """Initialize and return SentenceTransformer model."""
     try:
-        client = AzureOpenAI(
-            api_key=AZURE_OPENAI_API_KEY,
-            api_version=AZURE_OPENAI_API_VERSION,
-            azure_endpoint=AZURE_OPENAI_ENDPOINT
-        )
-        return client
+        model = SentenceTransformer(model_name)
+        return model
     except Exception as e:
-        logger.error(f"Error initializing Azure OpenAI client: {e}")
+        logger.error(f"Error initializing SentenceTransformer model: {e}")
         return None
 
-def get_azure_embedding(text, client):
-    """Get embedding from Azure OpenAI API."""
-    try:
-        response = client.embeddings.create(
-            input=text,
-            model=AZURE_EMBEDDING_DEPLOYMENT_NAME
-        )
-        return response.data[0].embedding
-    except Exception as e:
-        logger.error(f"Error getting Azure embedding: {e}")
-        return None
-
-def get_sentence_transformer_embedding(text, model):
-    """Get embedding from sentence-transformers."""
+def get_sentence_embedding(text, model):
+    """Get embedding from SentenceTransformer model."""
     try:
         embedding = model.encode([text])[0]
-        return embedding.tolist()
+        return embedding
     except Exception as e:
-        logger.error(f"Error getting sentence-transformers embedding: {e}")
+        logger.error(f"Error getting SentenceTransformer embedding: {e}")
         return None
 
-def run_benchmark(queries, repeat=3):
-    """Run benchmarking tests for both embedding methods."""
+def get_gemini_embedding(text):
+    """Get embedding from Gemini API."""
+    try:
+        # Try with LangChain first
+        try:
+            embedding_model = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+            return embedding_model.embed_query(text)
+        except Exception as langchain_error:
+            logger.warning(f"LangChain embedding failed: {langchain_error}, trying direct API")
+            
+            # Fall back to direct API call
+            result = google_genai.embed_content(
+                model="models/embedding-001",
+                content=text,
+                task_type="retrieval_document")
+            return result["embedding"]
+    except Exception as e:
+        logger.error(f"Error getting Gemini embedding: {e}")
+        return None
+
+def benchmark_embeddings(texts, num_iterations=3):
+    """Run embedding benchmark on different models."""
     results = {
-        "query": [],
         "method": [],
         "dimension": [],
         "time_ms": [],
         "success": []
     }
     
-    # Initialize Azure OpenAI client
-    azure_client = get_azure_openai_client()
-    if not azure_client:
-        logger.error("Azure OpenAI client initialization failed. Skipping Azure tests.")
+    # Initialize models
+    sentence_model = get_sentence_transformer_model()
+            
+    if not sentence_model:
+        logger.error("SentenceTransformer model initialization failed. Skipping tests.")
+        return pd.DataFrame(results)
     
-    # Initialize sentence-transformers model
-    try:
-        st_model = SentenceTransformer('all-MiniLM-L6-v2')
-        logger.info(f"Loaded sentence-transformers model: all-MiniLM-L6-v2")
-    except Exception as e:
-        logger.error(f"Error loading sentence-transformers model: {e}")
-        st_model = None
+    logger.info("Running benchmark...")
     
-    # Run tests for each query
-    for query in queries:
-        logger.info(f"Testing query: {query[:50]}...")
-        
-        # Test Azure OpenAI embeddings
-        if azure_client:
-            for i in range(repeat):
-                start_time = time.time()
-                embedding = get_azure_embedding(query, azure_client)
-                end_time = time.time()
-                
-                time_ms = (end_time - start_time) * 1000
-                dimension = len(embedding) if embedding else 0
-                success = embedding is not None
-                
-                results["query"].append(query)
-                results["method"].append("Azure OpenAI")
-                results["dimension"].append(dimension)
-                results["time_ms"].append(time_ms)
-                results["success"].append(success)
-                
-                logger.info(f"Azure OpenAI embedding: dim={dimension}, time={time_ms:.2f}ms, success={success}")
-        
-        # Test sentence-transformers embeddings
-        if st_model:
-            for i in range(repeat):
-                start_time = time.time()
-                embedding = get_sentence_transformer_embedding(query, st_model)
-                end_time = time.time()
-                
-                time_ms = (end_time - start_time) * 1000
-                dimension = len(embedding) if embedding else 0
-                success = embedding is not None
-                
-                results["query"].append(query)
-                results["method"].append("Sentence Transformers")
-                results["dimension"].append(dimension)
-                results["time_ms"].append(time_ms)
-                results["success"].append(success)
-                
-                logger.info(f"Sentence Transformers embedding: dim={dimension}, time={time_ms:.2f}ms, success={success}")
+    # Test SentenceTransformer embeddings
+    for i in range(num_iterations):
+        for text in texts:
+            start_time = time.time()
+            embedding = get_sentence_embedding(text, sentence_model)
+            end_time = time.time()
+            
+            time_ms = (end_time - start_time) * 1000
+            success = embedding is not None
+            dimension = len(embedding) if success else 0
+            
+            results["method"].append("SentenceTransformer")
+            results["dimension"].append(dimension)
+            results["time_ms"].append(time_ms)
+            results["success"].append(success)
+            
+            logger.info(f"SentenceTransformer embedding: dim={dimension}, time={time_ms:.2f}ms, success={success}")
     
+    # Test Gemini embeddings
+    for i in range(num_iterations):
+        for text in texts:
+            start_time = time.time()
+            embedding = get_gemini_embedding(text)
+            end_time = time.time()
+            
+            time_ms = (end_time - start_time) * 1000
+            success = embedding is not None
+            dimension = len(embedding) if success else 0
+            
+            results["method"].append("Gemini")
+            results["dimension"].append(dimension)
+            results["time_ms"].append(time_ms)
+            results["success"].append(success)
+            
+            logger.info(f"Gemini embedding: dim={dimension}, time={time_ms:.2f}ms, success={success}")
+    
+    # Convert results to DataFrame
     return pd.DataFrame(results)
 
-def analyze_results(results_df):
-    """Analyze and visualize benchmark results."""
-    logger.info("Analyzing benchmark results...")
+def visualize_results(results_df):
+    """Visualize benchmark results."""
+    plt.figure(figsize=(12, 10))
     
-    # Calculate average metrics by method
-    avg_metrics = results_df.groupby("method").agg({
-        "time_ms": ["mean", "std", "min", "max"],
-        "dimension": ["mean"],
-        "success": ["mean"]
-    }).reset_index()
-    
-    # Rename columns for better readability
-    avg_metrics.columns = ["method", "avg_time_ms", "std_time_ms", "min_time_ms", "max_time_ms", "avg_dimension", "success_rate"]
-    
-    # Print summary statistics
-    logger.info("\nSummary Statistics:")
-    logger.info(f"\n{avg_metrics.to_string(index=False)}")
-    
-    # Create comparison visualizations
-    plt.figure(figsize=(15, 10))
-    
-    # Plot average embedding time
-    plt.subplot(2, 2, 1)
-    sns.barplot(x="method", y="avg_time_ms", data=avg_metrics)
+    # Plot average time by method
+    plt.subplot(2, 1, 1)
+    sns.barplot(x="method", y="time_ms", data=results_df, estimator=np.mean)
     plt.title("Average Embedding Time (ms)")
     plt.ylabel("Time (ms)")
     plt.xlabel("Method")
     
-    # Plot embedding dimensions
-    plt.subplot(2, 2, 2)
-    sns.barplot(x="method", y="avg_dimension", data=avg_metrics)
+    # Plot dimensions by method
+    plt.subplot(2, 1, 2)
+    sns.barplot(x="method", y="dimension", data=results_df)
     plt.title("Embedding Dimensions")
     plt.ylabel("Dimensions")
     plt.xlabel("Method")
     
-    # Plot time distribution as boxplot
-    plt.subplot(2, 2, 3)
-    sns.boxplot(x="method", y="time_ms", data=results_df)
-    plt.title("Embedding Time Distribution")
-    plt.ylabel("Time (ms)")
-    plt.xlabel("Method")
-    
-    # Plot success rate
-    plt.subplot(2, 2, 4)
-    sns.barplot(x="method", y="success_rate", data=avg_metrics)
-    plt.title("Success Rate")
-    plt.ylabel("Success Rate")
-    plt.xlabel("Method")
-    
     plt.tight_layout()
+    plt.savefig("embedding_benchmark_results.png")
+    plt.close()
     
-    # Create data directory if it doesn't exist
-    os.makedirs('data', exist_ok=True)
-    plt.savefig('data/embedding_benchmark_results.png')
-    logger.info("Saved visualization to data/embedding_benchmark_results.png")
-    
-    # Save results to CSV and JSON
-    results_df.to_csv('data/embedding_benchmark_results.csv', index=False)
-    with open('data/embedding_benchmark_summary.json', 'w') as f:
-        json.dump(avg_metrics.to_dict(orient='records'), f, indent=4)
-    
-    logger.info("Saved detailed results to data/embedding_benchmark_results.csv")
-    logger.info("Saved summary to data/embedding_benchmark_summary.json")
-    
-    return avg_metrics
+    logger.info("Created visualization: embedding_benchmark_results.png")
 
 def main():
-    """Main function to run the benchmark."""
-    logger.info("Starting embedding benchmark...")
-    
-    # Load test data
-    queries = load_test_data(sample_count=10)
-    logger.info(f"Loaded {len(queries)} test queries")
+    """Run embedding benchmark."""
+    # Test texts
+    texts = [
+        "Java developer with 5 years experience in Spring Boot and React",
+        "Data scientist skilled in Python, machine learning, and big data technologies",
+        "Project manager with agile certification and experience in software development",
+        "UX designer with portfolio of mobile and web app designs"
+    ]
     
     # Run benchmark
-    results = run_benchmark(queries, repeat=3)
+    results = benchmark_embeddings(texts)
     
-    # Analyze results
-    summary = analyze_results(results)
+    # Print summary
+    print("\nEmbedding Benchmark Summary:")
+    print("-" * 50)
     
-    logger.info("Benchmark completed!")
+    summary = results.groupby("method").agg({
+        "time_ms": ["mean", "std", "min", "max"],
+        "dimension": "first",
+        "success": "mean"
+    })
+    
+    print(summary)
+    
+    # Visualize results
+    visualize_results(results)
+    
+    # Save detailed results
+    results.to_csv("embedding_benchmark_results.csv", index=False)
+    logger.info("Saved detailed results to embedding_benchmark_results.csv")
 
 if __name__ == "__main__":
     main() 

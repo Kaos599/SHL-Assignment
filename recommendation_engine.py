@@ -11,9 +11,10 @@ from langchain_core.output_parsers import StrOutputParser
 import os
 from dotenv import load_dotenv
 from pymongo import MongoClient
-from openai import AzureOpenAI
 import logging
 import traceback
+import google.generativeai as google_genai
+from embedding_storage import EmbeddingStorage  # Import our new EmbeddingStorage class
 
 # Load environment variables
 load_dotenv()
@@ -28,32 +29,24 @@ MONGO_URI = os.getenv("MONGO_URI")
 MONGO_DB = os.getenv("MONGO_DB", "SHL")
 MONGO_COLLECTION_PACKAGED = os.getenv("MONGO_COLLECTION_PACKAGED", "packaged_solutions")
 MONGO_COLLECTION_INDIVIDUAL = os.getenv("MONGO_COLLECTION_INDIVIDUAL", "individual_solutions")
+MONGO_EMBEDDINGS_COLLECTION = os.getenv("MONGO_EMBEDDINGS_COLLECTION", "embeddings")
 MONGO_CONNECT_TIMEOUT_MS = int(os.getenv("MONGO_CONNECT_TIMEOUT_MS", "30000"))
 MONGO_SOCKET_TIMEOUT_MS = int(os.getenv("MONGO_SOCKET_TIMEOUT_MS", "45000"))
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-# Azure OpenAI connection
-AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
-AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
-AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION")
-AZURE_EMBEDDING_DEPLOYMENT_NAME = os.getenv("AZURE_EMBEDDING_DEPLOYMENT_NAME", "text-embedding-ada-002")
-AZURE_OPENAI_CHAT_DEPLOYMENT_NAME = os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT_NAME", "gpt-4o")
-
 class SHLRecommendationEngine:
-    def __init__(self):
+    def __init__(self, skip_embedding_creation=False):
         print("Loading recommendation engine resources...")
         os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
+        google_genai.configure(api_key=GOOGLE_API_KEY)
         
-        # Initialize Azure OpenAI client
-        try:
-            self.azure_client = AzureOpenAI(
-                api_key=AZURE_OPENAI_API_KEY,
-                api_version=AZURE_OPENAI_API_VERSION,
-                azure_endpoint=AZURE_OPENAI_ENDPOINT
-            )
-        except Exception as e:
-            print(f"Warning: Could not initialize Azure OpenAI client: {e}")
-            self.azure_client = None
+        # Track whether to skip embedding creation
+        self.skip_embedding_creation = skip_embedding_creation
+        if skip_embedding_creation:
+            print("Skip embedding creation mode enabled - will use existing embeddings only")
+        
+        # Initialize Embedding Storage
+        self.embedding_storage = EmbeddingStorage()
         
         # Load data
         self.assessments_df = self.load_data_from_mongodb()
@@ -62,20 +55,26 @@ class SHLRecommendationEngine:
             print("Failed to load from MongoDB, falling back to JSON...")
             self.assessments_df = self.load_data_from_json()
         
-        # Check if we have saved Azure info
-        try:
-            with open('data/azure_openai_info.pkl', 'rb') as f:
-                self.azure_info = pickle.load(f)
-                print(f"Loaded Azure OpenAI info for {self.azure_info['embedding_model']}")
-        except FileNotFoundError:
-            self.azure_info = {
-                "api_version": AZURE_OPENAI_API_VERSION,
-                "embedding_model": AZURE_EMBEDDING_DEPLOYMENT_NAME,
-                "endpoint": AZURE_OPENAI_ENDPOINT
-            }
-            print("Created new Azure OpenAI info configuration")
+        # Prepare text for embedding if needed
+        if 'text_for_embedding' not in self.assessments_df.columns:
+            print("Preparing text for embedding...")
+            self.assessments_df['text_for_embedding'] = self.assessments_df.apply(self.prepare_text_for_embedding, axis=1)
         
-        # Load or create FAISS index
+        # Skip automatic embedding processing to speed up initialization
+        # Just check if embeddings exist instead
+        print("Checking for existing embeddings...")
+        try:
+            # Check if there are embeddings in MongoDB
+            client = self.get_mongo_client()
+            db = client[MONGO_DB]
+            embeddings_collection = db[MONGO_EMBEDDINGS_COLLECTION]
+            embeddings_count = embeddings_collection.count_documents({})
+            print(f"Found {embeddings_count} embeddings in MongoDB")
+            client.close()
+        except Exception as e:
+            print(f"Error checking embeddings: {e}")
+        
+        # Load or create FAISS index (as fallback if MongoDB search is unavailable)
         self.load_or_create_index()
         
         # Initialize LLM for query enhancement
@@ -172,62 +171,58 @@ class SHLRecommendationEngine:
                 print(f"Loaded FAISS index with {self.index.ntotal} vectors of dimension {self.index.d}")
                 
                 # Check if we have embeddings in the dataframe
-                if 'embedding' not in self.assessments_df.columns:
+                if 'embedding' not in self.assessments_df.columns and not self.skip_embedding_creation:
                     print("No embeddings found in dataframe. Creating embeddings...")
                     self.create_embeddings()
                     
                 # Test a sample embedding to verify dimensions match
-                self.test_index_compatibility()
+                if not self.skip_embedding_creation:
+                    self.test_index_compatibility()
             else:
-                print("No FAISS index found. Creating embeddings and index...")
+                if self.skip_embedding_creation:
+                    print("No FAISS index found but skip_embedding_creation is enabled.")
+                    print("Cannot proceed without either index or ability to create embeddings.")
+                    raise ValueError("No FAISS index found with skip_embedding_creation enabled")
+                else:
+                    print("No FAISS index found. Creating embeddings and index...")
+                    self.create_embeddings()
+                    self.create_faiss_index()
+        except Exception as e:
+            if self.skip_embedding_creation:
+                print(f"Error loading FAISS index: {e}")
+                print("Cannot create embeddings because skip_embedding_creation is enabled.")
+                raise ValueError("Failed to load index with skip_embedding_creation enabled") from e
+            else:
+                print(f"Error loading FAISS index: {e}")
+                print("Creating new embeddings and index...")
                 self.create_embeddings()
                 self.create_faiss_index()
-        except Exception as e:
-            print(f"Error loading FAISS index: {e}")
-            print("Creating new embeddings and index...")
-            self.create_embeddings()
-            self.create_faiss_index()
     
     def test_index_compatibility(self):
-        """Test compatibility between Azure embeddings and the loaded index."""
+        """Test compatibility between the loaded index and the embeddings."""
         try:
-            if self.azure_client is None:
-                print("Azure OpenAI client not initialized. Skipping compatibility test.")
+            if 'embedding' not in self.assessments_df.columns:
+                print("No embeddings found in dataframe. Cannot test compatibility.")
                 return
                 
-            sample_text = "Test query for Java developers"
+            # Get a sample embedding from the dataframe
+            sample_embedding = self.assessments_df['embedding'].iloc[0]
             
-            # Get embedding from Azure OpenAI
-            embedding = self.get_embedding(sample_text)
-            embedding_array = np.array([embedding], dtype=np.float32)
+            # Check if the sample embedding is in the index
+            if sample_embedding not in self.index:
+                print("Warning: Sample embedding not found in the index.")
             
-            # Check dimensions
-            expected_dim = self.index.d
-            actual_dim = embedding_array.shape[1]
-            
-            print(f"Testing index compatibility: expected dim={expected_dim}, actual dim={actual_dim}")
-            
-            if expected_dim != actual_dim:
-                print("Dimension mismatch! Rebuilding index...")
+            # Test embedding compatibility
+            if not self.skip_embedding_creation:
                 self.create_embeddings()
-                self.create_faiss_index()
-            else:
-                print("Index dimensions are compatible")
-                
+                self.test_index_compatibility()
         except Exception as e:
             print(f"Error testing index compatibility: {e}")
             traceback.print_exc()
     
     def create_embeddings(self):
         """Create embeddings for assessments."""
-        if self.azure_client is None:
-            print("Azure OpenAI client not initialized. Cannot create embeddings.")
-            return
-            
         print("Creating embeddings for assessments...")
-        
-        # Prepare text for embedding
-        self.assessments_df['text_for_embedding'] = self.assessments_df.apply(self.prepare_text_for_embedding, axis=1)
         
         # Generate embeddings
         embeddings = []
@@ -343,20 +338,23 @@ class SHLRecommendationEngine:
             return ""
     
     def get_embedding(self, text):
-        """Get embedding from Azure OpenAI API."""
+        """Get embedding for text using Gemini."""
+        # First try to use our embedding storage
+        embedding = self.embedding_storage.get_embedding(text)
+        if embedding:
+            return embedding
+            
+        # Fallback to direct Gemini API call
         try:
-            if self.azure_client is None:
-                print("Azure OpenAI client not initialized. Cannot get embedding.")
-                return None
-                
-            response = self.azure_client.embeddings.create(
-                input=text,
-                model=AZURE_EMBEDDING_DEPLOYMENT_NAME
-            )
-            return response.data[0].embedding
-        except Exception as e:
-            print(f"Error getting embedding: {e}")
-            traceback.print_exc()
+            print("Trying direct Gemini API as fallback...")
+            result = google_genai.embed_content(
+                model="models/embedding-001",
+                content=text,
+                task_type="retrieval_document")
+            embedding = result["embedding"]
+            return embedding
+        except Exception as fallback_error:
+            print(f"Fallback embedding also failed: {fallback_error}")
             return None
     
     def prepare_text_for_embedding(self, row):
@@ -397,73 +395,197 @@ class SHLRecommendationEngine:
         return ' '.join(text_fields)
     
     def recommend(self, query, url=None, top_k=10):
-        """Recommend SHL assessments based on query/job description."""
-        if url:
-            url_content = self.fetch_content_from_url(url)
-            if url_content:
-                query = f"{query} {url_content}"
-        
-        # Enhance query with LLM
-        enhanced_query = self.enhance_query(query)
-        print(f"Enhanced Query: {enhanced_query[:100]}...")
-        
-        # Extract any time constraints
-        time_constraint = self.extract_duration_constraint(query)
-        
-        # Prepare query for embedding
-        prepared_query = self.prepare_text_for_embedding({"name": enhanced_query})
-        
-        # Get embedding from Azure OpenAI
-        query_embedding_raw = self.get_embedding(prepared_query)
-        if query_embedding_raw is None:
-            print("Error getting query embedding")
-            return []
+        """
+        Recommend SHL assessments based on a query or URL.
+        """
+        try:
+            # Process URL if provided
+            if url:
+                content = self.fetch_content_from_url(url)
+                if content:
+                    query = content if not query else f"{query}\n\nJob Description: {content}"
             
-        query_embedding = np.array([query_embedding_raw], dtype=np.float32)
-        faiss.normalize_L2(query_embedding)
-        
-        # Search for similar assessments
-        k = min(top_k * 2, len(self.assessments_df))
-        
-        # Check dimensions match
-        if self.index.d != query_embedding.shape[1]:
-            print(f"Error: dimension mismatch. Index dim={self.index.d}, query dim={query_embedding.shape[1]}")
-            return []
+            # Enhance query with Gemini
+            enhanced_query = self.enhance_query(query)
+            print(f"Enhanced query: {enhanced_query[:100]}...")
             
-        scores, indices = self.index.search(query_embedding, k)
+            # Extract duration constraint
+            duration_constraint = self.extract_duration_constraint(query)
+            print(f"Duration constraint: {duration_constraint} minutes")
+            
+            # Extract skills
+            skills = self.extract_skills(query)
+            print(f"Extracted skills: {skills}")
+            
+            # Get embedding for query
+            query_embedding = self.embedding_storage.get_query_embedding(enhanced_query)
+            
+            # Try MongoDB-based similarity search first
+            try:
+                similar_results = self.embedding_storage.search_similar(query_embedding, top_k=top_k*2)
+                
+                if similar_results:
+                    print(f"Found {len(similar_results)} similar assessments using MongoDB")
+                    
+                    # Get assessment details from the dataframe
+                    recommendations = []
+                    for result in similar_results:
+                        assessment_id = result["assessment_id"]
+                        similarity = result["similarity"]
+                        
+                        # Find the assessment in the dataframe
+                        matching_rows = self.assessments_df[self.assessments_df['_id'].astype(str) == assessment_id]
+                        
+                        if not matching_rows.empty:
+                            assessment = matching_rows.iloc[0].to_dict()
+                            assessment['similarity_score'] = similarity
+                            recommendations.append(assessment)
+                    
+                    # Apply duration constraint if specified
+                    if duration_constraint and duration_constraint > 0:
+                        filtered_recommendations = []
+                        for rec in recommendations:
+                            # Check if duration is within the constraint
+                            duration = rec.get('duration_minutes', 0)
+                            if duration <= duration_constraint:
+                                filtered_recommendations.append(rec)
+                        
+                        if filtered_recommendations:
+                            recommendations = filtered_recommendations
+                        else:
+                            print(f"No recommendations match the duration constraint of {duration_constraint} minutes")
+                    
+                    # Sort by similarity score
+                    recommendations = sorted(recommendations, key=lambda x: x.get('similarity_score', 0), reverse=True)
+                    
+                    # Return top_k recommendations
+                    return recommendations[:top_k]
+            except Exception as e:
+                print(f"Error in MongoDB similarity search: {e}")
+                traceback.print_exc()
+            
+            # Fallback to FAISS if MongoDB search fails
+            print("Falling back to FAISS index for search...")
+            
+            # Get embedding for query
+            embedding = self.get_embedding(enhanced_query)
+            if embedding is None:
+                return []
+            
+            # Convert to numpy array
+            query_vector = np.array([embedding], dtype=np.float32)
+            
+            # Search
+            distances, indices = self.index.search(query_vector, top_k * 2)
+            
+            # Get recommendations
+            recommendations = []
+            for i, idx in enumerate(indices[0]):
+                if idx >= 0 and idx < len(self.assessments_df):
+                    assessment = self.assessments_df.iloc[idx].to_dict()
+                    assessment['similarity_score'] = float(1.0 - distances[0][i])
+                    recommendations.append(assessment)
+            
+            # Apply duration constraint if specified
+            if duration_constraint and duration_constraint > 0:
+                filtered_recommendations = []
+                for rec in recommendations:
+                    duration = rec.get('duration_minutes', 0)
+                    if duration <= duration_constraint:
+                        filtered_recommendations.append(rec)
+                
+                if filtered_recommendations:
+                    recommendations = filtered_recommendations
+            
+            # Sort by similarity score
+            recommendations = sorted(recommendations, key=lambda x: x.get('similarity_score', 0), reverse=True)
+            
+            return recommendations[:top_k]
+        except Exception as e:
+            print(f"Error in recommendation: {e}")
+            traceback.print_exc()
+            return []
+    
+    def generate_natural_language_response(self, query, recommendations, duration_constraint=None):
+        """
+        Generate a natural language response using Gemini based on the query and recommendations.
         
-        # Prepare candidates
-        candidates = []
-        for i, idx in enumerate(indices[0]):
-            if idx < len(self.assessments_df):
-                assessment = self.assessments_df.iloc[idx].to_dict()
-                assessment['score'] = float(scores[0][i])
-                candidates.append(assessment)
-        
-        # Filter by time constraint if provided
-        if time_constraint:
-            candidates = [candidate for candidate in candidates if candidate.get('duration_minutes') and candidate['duration_minutes'] <= time_constraint]
-        
-        # Sort by score and limit to top_k
-        candidates = sorted(candidates, key=lambda x: x['score'], reverse=True)[:top_k]
-        
-        # Format results
-        results = []
-        for candidate in candidates:
-            result = {
-                'name': candidate['name'],
-                'url': candidate.get('url', '#'),
-                'remote_testing': candidate.get('remote_testing', False),
-                'adaptive_irt': candidate.get('adaptive_irt', False),
-                'duration': candidate.get('assessment_length', 'Unknown'),
-                'duration_minutes': candidate.get('duration_minutes', 0),
-                'test_type': candidate.get('test_type', []),
-                'test_type_names': candidate.get('test_type_names', []),
-                'score': round(candidate['score'], 3)
-            }
-            results.append(result)
-        
-        return results
+        Args:
+            query (str): The original user query
+            recommendations (list): List of recommended assessments
+            duration_constraint (int, optional): Any duration constraint extracted from the query
+            
+        Returns:
+            str: Natural language response from Gemini
+        """
+        try:
+            # Check if Google Gemini API key is available
+            if not GOOGLE_API_KEY:
+                return "Natural language response unavailable (Gemini API key not configured)."
+            
+            # Create prompt for Gemini
+            prompt_template = """
+            You are an SHL Assessment Specialist helping a hiring manager find the right assessments.
+            
+            User Query: {query}
+            
+            Top Recommended Assessments:
+            {formatted_recommendations}
+            
+            {duration_info}
+            
+            Based on the user's query and the recommendations, provide a helpful analysis that:
+            1. Identifies the key skills and requirements from the query
+            2. Explains why these specific assessments are recommended
+            3. Highlights how they align with the job requirements
+            4. Provides guidance on how to use these assessments in the hiring process
+            
+            Keep your response concise (about 150-200 words) and conversational.
+            """
+            
+            # Format the recommendations for the prompt
+            formatted_recs = []
+            for i, rec in enumerate(recommendations[:5], 1):  # Use top 5 for the analysis
+                formatted_recs.append(f"{i}. {rec['name']} ({rec['test_type']}, Duration: {rec['duration']})")
+            
+            formatted_recommendations = "\n".join(formatted_recs)
+            
+            # Add duration constraint info if available
+            duration_info = ""
+            if duration_constraint:
+                duration_info = f"Note: The user specified a duration constraint of {duration_constraint} minutes."
+            
+            # Prepare the prompt
+            prompt = prompt_template.format(
+                query=query,
+                formatted_recommendations=formatted_recommendations,
+                duration_info=duration_info
+            )
+            
+            # Initialize Gemini model
+            model = genai.ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=GOOGLE_API_KEY)
+            
+            # Generate the response
+            response = model.invoke(prompt)
+            
+            # Extract the content
+            if hasattr(response, 'content') and response.content:
+                return response.content
+            else:
+                logger.warning("Empty response from Gemini")
+                return "I couldn't generate a detailed analysis at this time. Please review the recommended assessments above."
+                
+        except Exception as e:
+            logger.error(f"Error generating natural language response: {str(e)}")
+            logger.error(traceback.format_exc())
+            return f"I couldn't generate a detailed analysis at this time. Please review the recommended assessments above."
+    
+    def __del__(self):
+        """Clean up resources."""
+        try:
+            self.embedding_storage.close()
+        except:
+            pass
 
 if __name__ == "__main__":
     engine = SHLRecommendationEngine()
