@@ -15,6 +15,7 @@ import logging
 import traceback
 import google.generativeai as google_genai
 from embedding_storage import EmbeddingStorage  
+import json
 
 # Load environment variables
 load_dotenv()
@@ -299,7 +300,14 @@ class SHLRecommendationEngine:
             r"within\s*(\d+)",
             r"less than\s*(\d+)",
             r"max.*?(\d+)",
-            r"maximum.*?(\d+)"
+            r"maximum.*?(\d+)",
+            r'under (\d+)\s*(?:minute|min)',
+            r'shorter than (\d+)\s*(?:minute|min)',
+            r'(\d+)\s*(?:minute|min) or less',
+            r'no longer than (\d+)\s*(?:minute|min)',
+            r'no more than (\d+)\s*(?:minute|min)',
+            r'(\d+)\s*(?:minute|min) maximum',
+            r'up to (\d+)\s*(?:minute|min)'
         ]
         
         for pattern in time_patterns:
@@ -397,6 +405,15 @@ class SHLRecommendationEngine:
     def recommend(self, query, url=None, top_k=10):
         """
         Recommend SHL assessments based on a query or URL.
+        
+        Args:
+            query (str): The user's search query
+            url (str, optional): URL to job posting to extract additional context
+            top_k (int): Number of recommendations to return
+            
+        Returns:
+            list: List of recommendation dictionaries containing assessment details and scores
+                 Format matches what's expected by app.py API response
         """
         try:
             # Process URL if provided
@@ -438,7 +455,16 @@ class SHLRecommendationEngine:
                         
                         if not matching_rows.empty:
                             assessment = matching_rows.iloc[0].to_dict()
-                            assessment['similarity_score'] = similarity
+                            
+                            # Convert numpy/pandas types to Python native types for JSON serialization
+                            for key, value in assessment.items():
+                                if isinstance(value, (np.integer, np.floating)):
+                                    assessment[key] = float(value) if isinstance(value, np.floating) else int(value)
+                                elif isinstance(value, np.ndarray):
+                                    assessment[key] = value.tolist()
+                            
+                            # Add score for API format compatibility
+                            assessment['score'] = float(similarity)
                             recommendations.append(assessment)
                     
                     # Apply duration constraint if specified
@@ -456,7 +482,14 @@ class SHLRecommendationEngine:
                             print(f"No recommendations match the duration constraint of {duration_constraint} minutes")
                     
                     # Sort by similarity score
-                    recommendations = sorted(recommendations, key=lambda x: x.get('similarity_score', 0), reverse=True)
+                    recommendations = sorted(recommendations, key=lambda x: x.get('score', 0), reverse=True)
+                    
+                    # Format for API response
+                    for rec in recommendations:
+                        # Ensure all values can be JSON serialized
+                        for key, value in list(rec.items()):
+                            if isinstance(value, (np.ndarray, list)) and key != 'test_type_names' and key != 'job_levels':
+                                rec[key] = str(value)
                     
                     # Return top_k recommendations
                     return recommendations[:top_k]
@@ -483,7 +516,16 @@ class SHLRecommendationEngine:
             for i, idx in enumerate(indices[0]):
                 if idx >= 0 and idx < len(self.assessments_df):
                     assessment = self.assessments_df.iloc[idx].to_dict()
-                    assessment['similarity_score'] = float(1.0 - distances[0][i])
+                    
+                    # Convert numpy/pandas types to Python native types for JSON serialization
+                    for key, value in assessment.items():
+                        if isinstance(value, (np.integer, np.floating)):
+                            assessment[key] = float(value) if isinstance(value, np.floating) else int(value)
+                        elif isinstance(value, np.ndarray):
+                            assessment[key] = value.tolist()
+                    
+                    # Add score for API format compatibility
+                    assessment['score'] = float(1.0 - distances[0][i])
                     recommendations.append(assessment)
             
             # Apply duration constraint if specified
@@ -498,7 +540,14 @@ class SHLRecommendationEngine:
                     recommendations = filtered_recommendations
             
             # Sort by similarity score
-            recommendations = sorted(recommendations, key=lambda x: x.get('similarity_score', 0), reverse=True)
+            recommendations = sorted(recommendations, key=lambda x: x.get('score', 0), reverse=True)
+            
+            # Format for API response
+            for rec in recommendations:
+                # Ensure all values can be JSON serialized
+                for key, value in list(rec.items()):
+                    if isinstance(value, (np.ndarray, list)) and key != 'test_type_names' and key != 'job_levels':
+                        rec[key] = str(value)
             
             return recommendations[:top_k]
         except Exception as e:
@@ -546,7 +595,14 @@ class SHLRecommendationEngine:
             # Format the recommendations for the prompt
             formatted_recs = []
             for i, rec in enumerate(recommendations[:5], 1):  # Use top 5 for the analysis
-                formatted_recs.append(f"{i}. {rec['name']} ({rec['test_type']}, Duration: {rec['duration']})")
+                # Handle both 'name' and 'test_type' or 'test_type_names'
+                name = rec.get('name', 'Unknown Assessment')
+                test_type = rec.get('test_type', '')
+                if not test_type and 'test_type_names' in rec:
+                    test_type = ', '.join(rec['test_type_names']) if isinstance(rec['test_type_names'], list) else rec['test_type_names']
+                duration = rec.get('duration', 'Unknown duration')
+                
+                formatted_recs.append(f"{i}. {name} ({test_type}, Duration: {duration})")
             
             formatted_recommendations = "\n".join(formatted_recs)
             
@@ -597,8 +653,8 @@ if __name__ == "__main__":
     print("Test Query:", test_query)
     print("\nRecommendations:")
     for i, rec in enumerate(recommendations, 1):
-        print(f"{i}. {rec['name']} ({', '.join(rec['test_type_names'])}) - {rec['duration']}")
-        print(f"   Remote Testing: {rec['remote_testing']}, Adaptive: {rec['adaptive_irt']}")
-        print(f"   URL: {rec['url']}")
-        print(f"   Score: {rec['score']}")
+        print(f"{i}. {rec['name']} ({rec.get('test_type', '')}) - {rec.get('duration', 'Unknown')}")
+        print(f"   Remote Testing: {rec.get('remote_testing', 'Unknown')}, Adaptive: {rec.get('adaptive_irt', 'Unknown')}")
+        print(f"   URL: {rec.get('url', '#')}")
+        print(f"   Score: {rec.get('score', 0)}")
         print()
