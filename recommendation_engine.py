@@ -6,7 +6,7 @@ import re
 import requests
 from bs4 import BeautifulSoup
 import langchain_google_genai as genai
-from langchain_core.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate, ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 import os
 from dotenv import load_dotenv
@@ -16,6 +16,7 @@ import traceback
 import google.generativeai as google_genai
 from embedding_storage import EmbeddingStorage  
 import json
+from typing import Optional, List
 
 # Load environment variables
 load_dotenv()
@@ -272,7 +273,7 @@ class SHLRecommendationEngine:
     
     def initialize_llm(self):
         """Initialize the Google Gemini model for query enhancement."""
-        self.llm = genai.ChatGoogleGenerativeAI(model="gemini-1.5-flash")
+        self.llm = genai.ChatGoogleGenerativeAI(model="gemini-2.0-flash")
         
         self.query_template = PromptTemplate(
             input_variables=["query"],
@@ -303,37 +304,72 @@ Enhanced Query:"""
     def understand_query_with_gemini(self, query):
         """Use Gemini to understand the query and extract structured information."""
         try:
-            prompt = f"""
-            You are an expert at understanding job assessment queries. Analyze the following query and extract:
-            1. Duration constraints (in minutes)
-            2. Required skills
-            3. Job level
-            4. Test type preferences
+            # Define function for Gemini to call
+            query_analysis_fn = {
+                "name": "analyze_query",
+                "description": "Analyze a job assessment query to extract key information",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "duration_minutes": {
+                            "type": "integer",
+                            "description": "Duration constraint in minutes, if specified in the query"
+                        },
+                        "skills": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of skills mentioned or required in the query"
+                        },
+                        "test_types": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of test types mentioned or preferred in the query"
+                        }
+                    },
+                    "required": ["skills", "test_types"]
+                }
+            }
+
+            model = genai.ChatGoogleGenerativeAI(
+                model="gemini-2.0-flash",
+                google_api_key=GOOGLE_API_KEY,
+                temperature=0.1
+            )
             
-            Return the information in JSON format with these fields:
-            - duration_minutes: number or null
-            - skills: list of strings
-            - job_level: string or null
-            - test_types: list of strings
+            # Create messages for the model
+            messages = [
+                {"role": "system", "content": """You are an expert at understanding job assessment queries. Analyze the following query and extract:
+                1. Duration constraints (in minutes)
+                2. Required skills
+                3. Test type preferences
+                
+                Return the information in a structured format."""},
+                {"role": "user", "content": query}
+            ]
             
-            Query: {query}
+            response = model.invoke(
+                messages, 
+                tools=[query_analysis_fn]
+            )
             
-            Respond with ONLY the JSON object, no other text.
-            """
+            # Extract function call result
+            if response.tool_calls and len(response.tool_calls) > 0:
+                tool_call = response.tool_calls[0]
+                if tool_call.function.name == "analyze_query":
+                    import json
+                    result = json.loads(tool_call.function.arguments)
+                    return {
+                        "duration_minutes": result.get("duration_minutes"),
+                        "skills": result.get("skills", []),
+                        "test_types": result.get("test_types", [])
+                    }
             
-            model = genai.ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=GOOGLE_API_KEY)
-            response = model.invoke(prompt)
-            
-            if hasattr(response, 'content') and response.content:
-                try:
-                    return json.loads(response.content)
-                except json.JSONDecodeError:
-                    print(f"Failed to parse Gemini response as JSON: {response.content}")
-                    return {"duration_minutes": None, "skills": [], "job_level": None, "test_types": []}
-            return {"duration_minutes": None, "skills": [], "job_level": None, "test_types": []}
+            # Fallback if no function call was made
+            return {"duration_minutes": None, "skills": [], "test_types": []}
         except Exception as e:
             print(f"Error using Gemini for query understanding: {e}")
-            return {"duration_minutes": None, "skills": [], "job_level": None, "test_types": []}
+            traceback.print_exc()
+            return {"duration_minutes": None, "skills": [], "test_types": []}
     
     def extract_duration_constraint(self, query):
         """Extract any time/duration constraint from the query using Gemini."""
@@ -497,7 +533,6 @@ Enhanced Query:"""
             
         Returns:
             list: List of recommendation dictionaries containing assessment details and scores
-                 Format matches what's expected by app.py API response
         """
         try:
             # Process URL if provided
@@ -513,16 +548,14 @@ Enhanced Query:"""
             # Extract duration constraint
             duration_constraint = self.extract_duration_constraint(query)
             if duration_constraint:
-                print(f"Duration constraint: {duration_constraint} minutes (equivalent to {duration_constraint/60:.1f} hours)")
-            else:
-                print("No duration constraint detected")
+                print(f"Duration constraint: {duration_constraint} minutes")
             
             # Extract skills
             skills = self.extract_skills(query)
             print(f"Extracted skills: {skills}")
             
             # Get embedding for query
-            query_embedding = self.embedding_storage.get_query_embedding(enhanced_query)
+            query_embedding = self.get_embedding(enhanced_query)
             
             # Try MongoDB-based similarity search first
             try:
@@ -535,13 +568,48 @@ Enhanced Query:"""
                     recommendations = []
                     for result in similar_results:
                         assessment_id = result["assessment_id"]
-                        similarity = result["similarity"]
+                        base_similarity = result["similarity"]
                         
                         # Find the assessment in the dataframe
                         matching_rows = self.assessments_df[self.assessments_df['_id'].astype(str) == assessment_id]
                         
                         if not matching_rows.empty:
                             assessment = matching_rows.iloc[0].to_dict()
+                            
+                            # Calculate boosted score based on multiple factors
+                            score = base_similarity
+                            
+                            # Boost score if skills match
+                            if skills:
+                                assessment_skills = assessment.get('skills', [])
+                                if isinstance(assessment_skills, str):
+                                    assessment_skills = [s.strip() for s in assessment_skills.split(',')]
+                                skill_matches = sum(1 for skill in skills if skill.lower() in [s.lower() for s in assessment_skills])
+                                if skill_matches > 0:
+                                    score *= (1 + (skill_matches * 0.2))  # Boost by 20% per matching skill
+                            
+                            # Boost score if duration matches constraint
+                            if duration_constraint:
+                                assessment_duration = assessment.get('duration_minutes', 0)
+                                if assessment_duration <= duration_constraint:
+                                    score *= 1.3  # Boost by 30% if duration matches
+                            
+                            # Boost score if test type matches
+                            test_type = assessment.get('test_type', '')
+                            if test_type:
+                                # Check if test_type is a list or string and handle accordingly
+                                if isinstance(test_type, list):
+                                    # If it's a list, check if any of our target types are in the list
+                                    if any(any(target.lower() in t.lower() for t in test_type if isinstance(t, str)) 
+                                           for target in ['cognitive', 'skills', 'personality']):
+                                        score *= 1.2  # Boost by 20% for relevant test types
+                                else:
+                                    # If it's not a list (assumed to be string), proceed as before
+                                    if any(t.lower() in test_type.lower() for t in ['cognitive', 'skills', 'personality']):
+                                        score *= 1.2  # Boost by 20% for relevant test types
+                            
+                            # Normalize score to be between 0 and 1
+                            score = min(1.0, max(0.0, score))
                             
                             # Convert numpy/pandas types to Python native types for JSON serialization
                             for key, value in assessment.items():
@@ -551,7 +619,7 @@ Enhanced Query:"""
                                     assessment[key] = value.tolist()
                             
                             # Add score for API format compatibility
-                            assessment['score'] = float(similarity)
+                            assessment['score'] = float(score)
                             recommendations.append(assessment)
                     
                     # Apply duration constraint if specified
@@ -559,21 +627,15 @@ Enhanced Query:"""
                         original_count = len(recommendations)
                         filtered_recommendations = []
                         for rec in recommendations:
-                            # Check if duration is within the constraint
                             duration = rec.get('duration_minutes', 0)
                             if duration <= duration_constraint:
                                 filtered_recommendations.append(rec)
                         
                         if filtered_recommendations:
-                            print(f"Filtered from {original_count} to {len(filtered_recommendations)} recommendations based on duration constraint of {duration_constraint} minutes")
+                            print(f"Filtered from {original_count} to {len(filtered_recommendations)} recommendations based on duration constraint")
                             recommendations = filtered_recommendations
-                        else:
-                            print(f"Warning: No recommendations match the strict duration constraint of {duration_constraint} minutes.")
-                            print(f"Returning all recommendations and sorting by duration.")
-                            # Sort by duration as a fallback
-                            recommendations = sorted(recommendations, key=lambda x: x.get('duration_minutes', float('inf')))
                     
-                    # Sort by similarity score
+                    # Sort by boosted score
                     recommendations = sorted(recommendations, key=lambda x: x.get('score', 0), reverse=True)
                     
                     # Format for API response
@@ -583,7 +645,6 @@ Enhanced Query:"""
                             if isinstance(value, (np.ndarray, list)) and key != 'test_type_names' and key != 'job_levels':
                                 rec[key] = str(value)
                     
-                    # Return top_k recommendations
                     return recommendations[:top_k]
             except Exception as e:
                 print(f"Error in MongoDB similarity search: {e}")
@@ -609,6 +670,42 @@ Enhanced Query:"""
                 if idx >= 0 and idx < len(self.assessments_df):
                     assessment = self.assessments_df.iloc[idx].to_dict()
                     
+                    # Calculate boosted score based on multiple factors
+                    base_similarity = float(1.0 - distances[0][i])
+                    score = base_similarity
+                    
+                    # Boost score if skills match
+                    if skills:
+                        assessment_skills = assessment.get('skills', [])
+                        if isinstance(assessment_skills, str):
+                            assessment_skills = [s.strip() for s in assessment_skills.split(',')]
+                        skill_matches = sum(1 for skill in skills if skill.lower() in [s.lower() for s in assessment_skills])
+                        if skill_matches > 0:
+                            score *= (1 + (skill_matches * 0.2))  # Boost by 20% per matching skill
+                    
+                    # Boost score if duration matches constraint
+                    if duration_constraint:
+                        assessment_duration = assessment.get('duration_minutes', 0)
+                        if assessment_duration <= duration_constraint:
+                            score *= 1.3  # Boost by 30% if duration matches
+                    
+                    # Boost score if test type matches
+                    test_type = assessment.get('test_type', '')
+                    if test_type:
+                        # Check if test_type is a list or string and handle accordingly
+                        if isinstance(test_type, list):
+                            # If it's a list, check if any of our target types are in the list
+                            if any(any(target.lower() in t.lower() for t in test_type if isinstance(t, str)) 
+                                   for target in ['cognitive', 'skills', 'personality']):
+                                score *= 1.2  # Boost by 20% for relevant test types
+                        else:
+                            # If it's not a list (assumed to be string), proceed as before
+                            if any(t.lower() in test_type.lower() for t in ['cognitive', 'skills', 'personality']):
+                                score *= 1.2  # Boost by 20% for relevant test types
+                    
+                    # Normalize score to be between 0 and 1
+                    score = min(1.0, max(0.0, score))
+                    
                     # Convert numpy/pandas types to Python native types for JSON serialization
                     for key, value in assessment.items():
                         if isinstance(value, (np.integer, np.floating)):
@@ -617,7 +714,7 @@ Enhanced Query:"""
                             assessment[key] = value.tolist()
                     
                     # Add score for API format compatibility
-                    assessment['score'] = float(1.0 - distances[0][i])
+                    assessment['score'] = float(score)
                     recommendations.append(assessment)
             
             # Apply duration constraint if specified
@@ -630,15 +727,10 @@ Enhanced Query:"""
                         filtered_recommendations.append(rec)
                 
                 if filtered_recommendations:
-                    print(f"Filtered from {original_count} to {len(filtered_recommendations)} recommendations based on duration constraint of {duration_constraint} minutes")
+                    print(f"Filtered from {original_count} to {len(filtered_recommendations)} recommendations based on duration constraint")
                     recommendations = filtered_recommendations
-                else:
-                    print(f"Warning: No recommendations match the strict duration constraint of {duration_constraint} minutes.")
-                    print(f"Returning all recommendations and sorting by duration.")
-                    # Sort by duration as a fallback
-                    recommendations = sorted(recommendations, key=lambda x: x.get('duration_minutes', float('inf')))
             
-            # Sort by similarity score
+            # Sort by boosted score
             recommendations = sorted(recommendations, key=lambda x: x.get('score', 0), reverse=True)
             
             # Format for API response
@@ -655,85 +747,103 @@ Enhanced Query:"""
             return []
     
     def generate_natural_language_response(self, query, recommendations, duration_constraint=None):
-        """
-        Generate a natural language response using Gemini based on the query and recommendations.
-        
-        Args:
-            query (str): The original user query
-            recommendations (list): List of recommended assessments
-            duration_constraint (int, optional): Any duration constraint extracted from the query
-            
-        Returns:
-            str: Natural language response from Gemini
-        """
+        """Generate a natural language response using Gemini based on the query and recommendations."""
         try:
-            # Check if Google Gemini API key is available
             if not GOOGLE_API_KEY:
                 return "Natural language response unavailable (Gemini API key not configured)."
             
-            # Create prompt for Gemini
-            prompt_template = """
-            You are an SHL Assessment Specialist helping a hiring manager find the right assessments.
-            
-            User Query: {query}
-            
-            Top Recommended Assessments:
-            {formatted_recommendations}
-            
-            {duration_info}
-            
-            Based on the user's query and the recommendations, provide a helpful analysis that:
-            1. Identifies the key skills and requirements from the query
-            2. Explains why these specific assessments are recommended
-            3. Highlights how they align with the job requirements
-            4. Provides guidance on how to use these assessments in the hiring process
-            
-            Keep your response concise (about 150-200 words) and conversational.
-            """
-            
-            # Format the recommendations for the prompt
+            # Format recommendations for the prompt
             formatted_recs = []
-            for i, rec in enumerate(recommendations[:5], 1):  # Use top 5 for the analysis
-                # Handle both 'name' and 'test_type' or 'test_type_names'
+            for i, rec in enumerate(recommendations[:5], 1):
                 name = rec.get('name', 'Unknown Assessment')
                 test_type = rec.get('test_type', '')
                 if not test_type and 'test_type_names' in rec:
                     test_type = ', '.join(rec['test_type_names']) if isinstance(rec['test_type_names'], list) else rec['test_type_names']
-                duration = rec.get('duration', 'Unknown duration')
-                
+                duration = rec.get('duration_minutes', 'Unknown duration')
+                if duration != 'Unknown duration':
+                    duration = f"{duration} minutes"
                 formatted_recs.append(f"{i}. {name} ({test_type}, Duration: {duration})")
             
             formatted_recommendations = "\n".join(formatted_recs)
+            duration_info = f"Note: The user specified a duration constraint of {duration_constraint} minutes." if duration_constraint else ""
             
-            # Add duration constraint info if available
-            duration_info = ""
-            if duration_constraint:
-                duration_info = f"Note: The user specified a duration constraint of {duration_constraint} minutes."
+            # Define function for Gemini to call
+            response_fn = {
+                "name": "generate_response",
+                "description": "Generate a natural language response to assessment recommendations",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "analysis": {
+                            "type": "string",
+                            "description": "Detailed analysis of the recommendations"
+                        },
+                        "key_points": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Key points about the recommendations"
+                        },
+                        "next_steps": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Suggested next steps for the user"
+                        }
+                    },
+                    "required": ["analysis"]
+                }
+            }
             
-            # Prepare the prompt
-            prompt = prompt_template.format(
-                query=query,
-                formatted_recommendations=formatted_recommendations,
-                duration_info=duration_info
+            model = genai.ChatGoogleGenerativeAI(
+                model="gemini-2.0-flash",
+                google_api_key=GOOGLE_API_KEY,
+                temperature=0.7
             )
             
-            # Initialize Gemini model
-            model = genai.ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=GOOGLE_API_KEY)
-            
-            # Generate the response
-            response = model.invoke(prompt)
-            
-            # Extract the content
-            if hasattr(response, 'content') and response.content:
-                return response.content
-            else:
-                logger.warning("Empty response from Gemini")
-                return "I couldn't generate a detailed analysis at this time. Please review the recommended assessments above."
+            # Create messages for the model
+            messages = [
+                {"role": "system", "content": """You are an SHL Assessment Specialist helping a hiring manager find the right assessments.
                 
+                Based on the user's query and the recommendations, provide a helpful analysis that:
+                1. Identifies the key skills and requirements from the query
+                2. Explains why these specific assessments are recommended
+                3. Highlights how they align with the job requirements
+                4. Provides guidance on how to use these assessments in the hiring process
+                
+                Keep your response concise (about 150-200 words) and conversational.
+                Always mention the duration of each assessment in your analysis."""},
+                {"role": "user", "content": f"""User Query: {query}
+                
+                Top Recommended Assessments:
+                {formatted_recommendations}
+                
+                {duration_info}"""}
+            ]
+            
+            response = model.invoke(
+                messages,
+                tools=[response_fn]
+            )
+            
+            # Extract function call result
+            if response.tool_calls and len(response.tool_calls) > 0:
+                tool_call = response.tool_calls[0]
+                if tool_call.function.name == "generate_response":
+                    import json
+                    result = json.loads(tool_call.function.arguments)
+                    return result.get("analysis", "")
+            
+            # Fallback to direct text response if function calling failed
+            if hasattr(response, 'content'):
+                return str(response.content)
+            elif hasattr(response, 'text'):
+                return str(response.text)
+                
+            return "I couldn't generate a detailed analysis at this time. Please review the recommended assessments above."
+            
         except Exception as e:
             logger.error(f"Error generating natural language response: {str(e)}")
             logger.error(traceback.format_exc())
-            return f"I couldn't generate a detailed analysis at this time. Please review the recommended assessments above."
+            return "I couldn't generate a detailed analysis at this time. Please review the recommended assessments above."
     
     def __del__(self):
         """Clean up resources."""
