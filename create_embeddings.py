@@ -23,10 +23,10 @@ logger = logging.getLogger(__name__)
 
 # MongoDB connection
 MONGO_URI = os.getenv("MONGO_URI")
-MONGO_DB = os.getenv("MONGO_DB", "SHL")
-MONGO_COLLECTION_PACKAGED = os.getenv("MONGO_COLLECTION_PACKAGED", "packaged_solutions")
-MONGO_COLLECTION_INDIVIDUAL = os.getenv("MONGO_COLLECTION_INDIVIDUAL", "individual_solutions")
-MONGO_EMBEDDINGS_COLLECTION = os.getenv("MONGO_EMBEDDINGS_COLLECTION", "embeddings")
+MONGO_DB = os.getenv("MONGO_DB")
+MONGO_COLLECTION_PACKAGED = os.getenv("MONGO_COLLECTION_PACKAGED")
+MONGO_COLLECTION_INDIVIDUAL = os.getenv("MONGO_COLLECTION_INDIVIDUAL")
+MONGO_EMBEDDINGS_COLLECTION = os.getenv("MONGO_EMBEDDINGS_COLLECTION")
 
 # Google API key
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
@@ -67,7 +67,7 @@ class GeminiEmbeddingStorage:
         # Initialize Gemini embedding model
         try:
             # LangChain wrapper provides a simpler interface
-            self.embedding_model = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+            self.embedding_model = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
             
             # Test the model with a simple embedding request
             test_embedding = self.get_embedding("This is a test")
@@ -218,16 +218,19 @@ def load_data_from_collection(client, collection_name, limit=None, chunk_size=50
                 # Convert to dataframe
                 chunk_df = pd.DataFrame(chunk_data)
                 
-                # Create text_for_embedding
+                # Create text_for_embedding with enhanced information
                 chunk_df['text_for_embedding'] = chunk_df.apply(
                     lambda row: f"name: {row.get('name', 'Unknown')}\n"
                                f"adaptive_irt: {row.get('adaptive_irt', False)}\n"
                                f"remote_testing: {row.get('remote_testing', False)}\n"
                                f"test_type: {', '.join(str(t) for t in row.get('test_type', []))}\n" 
                                f"test_type_names: {', '.join(str(t) for t in row.get('test_type_names', []))}\n"
+                               f"job_levels: {', '.join(str(jl) for jl in (row.get('job_levels', []) if isinstance(row.get('job_levels'), (list, tuple)) else []))}\n"
+                               f"languages: {', '.join(str(lang) for lang in (row.get('languages', []) if isinstance(row.get('languages'), (list, tuple)) else []))}\n"
                                f"url: {row.get('url', '')}\n"
                                f"category: {row.get('category', '')}\n"
-                               f"duration_minutes: {row.get('duration_minutes', 0)}",
+                               f"duration_minutes: {row.get('duration_minutes', 0)}\n"
+                               f"description: {row.get('description', '')[:200]}",
                     axis=1
                 )
                 
