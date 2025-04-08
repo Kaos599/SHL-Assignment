@@ -2,7 +2,17 @@
 
 This system helps HR professionals and hiring managers find the most relevant SHL assessments for their job requirements by using advanced natural language processing and vector similarity search.
 
+## Screenshots
+
+### Frontend
+![Screenshot 2025-04-08 190704](https://github.com/user-attachments/assets/f776a85f-f375-4579-a446-342206705b06)
+### Analysis
+![Screenshot 2025-04-08 190744](https://github.com/user-attachments/assets/a4337b72-98a2-41b3-86f2-bd54c6c8e472)
+### Analysis Table
+![Screenshot 2025-04-08 190754](https://github.com/user-attachments/assets/387930cc-7eb9-4ccb-8acb-2049514837be)
+
 ## Features
+
 
 - **Natural Language Query Processing**: Interprets job descriptions and requirements in natural language
 - **Google Gemini-powered Embeddings**: Uses Gemini embeddings for semantic search capabilities
