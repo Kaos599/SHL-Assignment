@@ -8,6 +8,8 @@ import os
 from dotenv import load_dotenv
 import logging
 import traceback
+from bson import ObjectId
+import json
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -15,6 +17,13 @@ logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
+
+# Custom JSON encoder to handle ObjectId
+class CustomJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, ObjectId):
+            return str(obj)
+        return super().default(obj)
 
 # Initialize the FastAPI app
 app = FastAPI(
@@ -31,7 +40,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 recommendation_engine = None
 
@@ -61,6 +69,11 @@ class RecommendationResponse(BaseModel):
     recommendations: List[Dict[str, Any]]
     duration_constraint: Optional[int] = None
     natural_language_response: Optional[str] = None
+
+    class Config:
+        json_encoders = {
+            ObjectId: str
+        }
 
 # Root route
 @app.get("/", tags=["General"])
@@ -99,14 +112,25 @@ async def get_recommendations(
         recommendations = engine.recommend(query, url, max_results)
         logger.info(f"Generated {len(recommendations)} recommendations")
         
+        # Log the first recommendation to debug ObjectId serialization
+        if recommendations:
+            logger.info(f"First recommendation structure: {json.dumps(recommendations[0], cls=CustomJSONEncoder)}")
+        
         # Extract the enhanced query if available
         enhanced_query = None
         duration_constraint = engine.extract_duration_constraint(query)
+        logger.info(f"Duration constraint: {duration_constraint}")
         
         # Generate natural language response using Gemini
         natural_language_response = engine.generate_natural_language_response(
             query, recommendations, duration_constraint
         )
+        logger.info(f"Generated natural language response: {natural_language_response}")
+        
+        # Convert ObjectId to string in recommendations
+        for rec in recommendations:
+            if '_id' in rec:
+                rec['_id'] = str(rec['_id'])
         
         return {
             "query": query,
@@ -139,14 +163,25 @@ async def post_recommendations(request: RecommendationRequest):
         )
         logger.info(f"Generated {len(recommendations)} recommendations")
         
+        # Log the first recommendation to debug ObjectId serialization
+        if recommendations:
+            logger.info(f"First recommendation structure: {json.dumps(recommendations[0], cls=CustomJSONEncoder)}")
+        
         # Extract the enhanced query if available
         enhanced_query = None
         duration_constraint = engine.extract_duration_constraint(request.query)
+        logger.info(f"Duration constraint: {duration_constraint}")
         
         # Generate natural language response using Gemini
         natural_language_response = engine.generate_natural_language_response(
             request.query, recommendations, duration_constraint
         )
+        logger.info(f"Generated natural language response: {natural_language_response}")
+        
+        # Convert ObjectId to string in recommendations
+        for rec in recommendations:
+            if '_id' in rec:
+                rec['_id'] = str(rec['_id'])
         
         return {
             "query": request.query,
@@ -159,7 +194,6 @@ async def post_recommendations(request: RecommendationRequest):
         logger.error(f"Error generating recommendations: {str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Error generating recommendations: {str(e)}")
-
 
 if __name__ == "__main__":
     # Get port from environment variable or use default
