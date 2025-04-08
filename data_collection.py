@@ -82,19 +82,26 @@ def get_page_content(url, use_selenium=False):
         try:
             print(f"Using Selenium to fetch {url}")
             driver.get(url)
-            # Wait for page to load
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            
+            # Wait for page to load and table to be present
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.TAG_NAME, "table"))
             )
             
             # Scroll down to load dynamic content
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(2)  # Give time for JavaScript to execute
+            time.sleep(3)  # Give more time for JavaScript to execute
             
+            # Scroll back up to ensure all content is loaded
+            driver.execute_script("window.scrollTo(0, 0);")
+            time.sleep(1)
+            
+            # Get the page source after all content is loaded
             page_source = driver.page_source
             return BeautifulSoup(page_source, 'html.parser')
         except Exception as e:
             print(f"Error fetching {url} with Selenium: {e}")
+            traceback.print_exc()
             return None
         finally:
             driver.quit()
@@ -758,11 +765,18 @@ def process_catalog_page(url, solution_type):
     """Process a single catalog page."""
     try:
         print(f"\nScraping {url}")
-        soup = get_page_content(url)
+        # Always use Selenium for catalog pages to ensure we get dynamic content
+        soup = get_page_content(url, use_selenium=True)
+        if not soup:
+            print(f"Failed to get content for {url}")
+            return []
+            
         page_solutions = parse_catalog_page(soup, solution_type)
+        print(f"Found {len(page_solutions)} solutions on page {url}")
         return page_solutions
     except Exception as e:
         print(f"Error processing {url}: {e}")
+        traceback.print_exc()
         return []
 
 def preprocess_assessments(assessments):
