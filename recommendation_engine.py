@@ -16,6 +16,10 @@ import traceback
 import google.generativeai as google_genai
 from embedding_storage import EmbeddingStorage  
 import json
+from langchain_core.pydantic_v1 import BaseModel, Field
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import PydanticOutputParser
+from typing import Optional, List
 
 # Load environment variables
 load_dotenv()
@@ -34,6 +38,13 @@ MONGO_EMBEDDINGS_COLLECTION = os.getenv("MONGO_EMBEDDINGS_COLLECTION", "embeddin
 MONGO_CONNECT_TIMEOUT_MS = int(os.getenv("MONGO_CONNECT_TIMEOUT_MS", "30000"))
 MONGO_SOCKET_TIMEOUT_MS = int(os.getenv("MONGO_SOCKET_TIMEOUT_MS", "45000"))
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+
+class QueryAnalysis(BaseModel):
+    """Analysis of a job assessment query."""
+    duration_minutes: Optional[int] = Field(None, description="Duration constraint in minutes")
+    skills: List[str] = Field(default_factory=list, description="List of required skills")
+    job_level: Optional[str] = Field(None, description="Job level (entry-level, mid-level, senior, etc.)")
+    test_types: List[str] = Field(default_factory=list, description="List of preferred test types")
 
 class SHLRecommendationEngine:
     def __init__(self, skip_embedding_creation=False):
@@ -303,34 +314,29 @@ Enhanced Query:"""
     def understand_query_with_gemini(self, query):
         """Use Gemini to understand the query and extract structured information."""
         try:
-            prompt = f"""
-            You are an expert at understanding job assessment queries. Analyze the following query and extract:
-            1. Duration constraints (in minutes)
-            2. Required skills
-            3. Job level
-            4. Test type preferences
-            
-            Return the information in JSON format with these fields:
-            - duration_minutes: number or null
-            - skills: list of strings
-            - job_level: string or null
-            - test_types: list of strings
-            
-            Query: {query}
-            
-            Respond with ONLY the JSON object, no other text.
-            """
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", """You are an expert at understanding job assessment queries. Analyze the following query and extract:
+                1. Duration constraints (in minutes)
+                2. Required skills
+                3. Job level
+                4. Test type preferences
+                
+                Return the information in a structured format."""),
+                ("human", "{query}")
+            ])
             
             model = genai.ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=GOOGLE_API_KEY)
-            response = model.invoke(prompt)
+            structured_model = model.with_structured_output(QueryAnalysis)
             
-            if hasattr(response, 'content') and response.content:
-                try:
-                    return json.loads(response.content)
-                except json.JSONDecodeError:
-                    print(f"Failed to parse Gemini response as JSON: {response.content}")
-                    return {"duration_minutes": None, "skills": [], "job_level": None, "test_types": []}
-            return {"duration_minutes": None, "skills": [], "job_level": None, "test_types": []}
+            chain = prompt | structured_model
+            result = chain.invoke({"query": query})
+            
+            return {
+                "duration_minutes": result.duration_minutes,
+                "skills": result.skills,
+                "job_level": result.job_level,
+                "test_types": result.test_types
+            }
         except Exception as e:
             print(f"Error using Gemini for query understanding: {e}")
             return {"duration_minutes": None, "skills": [], "job_level": None, "test_types": []}
@@ -655,81 +661,53 @@ Enhanced Query:"""
             return []
     
     def generate_natural_language_response(self, query, recommendations, duration_constraint=None):
-        """
-        Generate a natural language response using Gemini based on the query and recommendations.
-        
-        Args:
-            query (str): The original user query
-            recommendations (list): List of recommended assessments
-            duration_constraint (int, optional): Any duration constraint extracted from the query
-            
-        Returns:
-            str: Natural language response from Gemini
-        """
+        """Generate a natural language response using Gemini based on the query and recommendations."""
         try:
-            # Check if Google Gemini API key is available
             if not GOOGLE_API_KEY:
                 return "Natural language response unavailable (Gemini API key not configured)."
             
-            # Create prompt for Gemini
-            prompt_template = """
-            You are an SHL Assessment Specialist helping a hiring manager find the right assessments.
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", """You are an SHL Assessment Specialist helping a hiring manager find the right assessments.
+                
+                Based on the user's query and the recommendations, provide a helpful analysis that:
+                1. Identifies the key skills and requirements from the query
+                2. Explains why these specific assessments are recommended
+                3. Highlights how they align with the job requirements
+                4. Provides guidance on how to use these assessments in the hiring process
+                
+                Keep your response concise (about 150-200 words) and conversational."""),
+                ("human", """User Query: {query}
+                
+                Top Recommended Assessments:
+                {formatted_recommendations}
+                
+                {duration_info}""")
+            ])
             
-            User Query: {query}
-            
-            Top Recommended Assessments:
-            {formatted_recommendations}
-            
-            {duration_info}
-            
-            Based on the user's query and the recommendations, provide a helpful analysis that:
-            1. Identifies the key skills and requirements from the query
-            2. Explains why these specific assessments are recommended
-            3. Highlights how they align with the job requirements
-            4. Provides guidance on how to use these assessments in the hiring process
-            
-            Keep your response concise (about 150-200 words) and conversational.
-            """
-            
-            # Format the recommendations for the prompt
             formatted_recs = []
-            for i, rec in enumerate(recommendations[:5], 1):  # Use top 5 for the analysis
-                # Handle both 'name' and 'test_type' or 'test_type_names'
+            for i, rec in enumerate(recommendations[:5], 1):
                 name = rec.get('name', 'Unknown Assessment')
                 test_type = rec.get('test_type', '')
                 if not test_type and 'test_type_names' in rec:
                     test_type = ', '.join(rec['test_type_names']) if isinstance(rec['test_type_names'], list) else rec['test_type_names']
                 duration = rec.get('duration', 'Unknown duration')
-                
                 formatted_recs.append(f"{i}. {name} ({test_type}, Duration: {duration})")
             
             formatted_recommendations = "\n".join(formatted_recs)
+            duration_info = f"Note: The user specified a duration constraint of {duration_constraint} minutes." if duration_constraint else ""
             
-            # Add duration constraint info if available
-            duration_info = ""
-            if duration_constraint:
-                duration_info = f"Note: The user specified a duration constraint of {duration_constraint} minutes."
-            
-            # Prepare the prompt
-            prompt = prompt_template.format(
-                query=query,
-                formatted_recommendations=formatted_recommendations,
-                duration_info=duration_info
-            )
-            
-            # Initialize Gemini model
             model = genai.ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=GOOGLE_API_KEY)
+            structured_model = model.with_structured_output(NaturalLanguageResponse)
             
-            # Generate the response
-            response = model.invoke(prompt)
+            chain = prompt | structured_model
+            result = chain.invoke({
+                "query": query,
+                "formatted_recommendations": formatted_recommendations,
+                "duration_info": duration_info
+            })
             
-            # Extract the content
-            if hasattr(response, 'content') and response.content:
-                return response.content
-            else:
-                logger.warning("Empty response from Gemini")
-                return "I couldn't generate a detailed analysis at this time. Please review the recommended assessments above."
-                
+            return result.analysis
+            
         except Exception as e:
             logger.error(f"Error generating natural language response: {str(e)}")
             logger.error(traceback.format_exc())
