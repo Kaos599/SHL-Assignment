@@ -9,6 +9,8 @@ from pymongo import MongoClient
 from urllib.parse import urljoin
 import re
 import traceback
+import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor
 
 # Import Selenium libraries for dynamic content
 from selenium import webdriver
@@ -289,23 +291,37 @@ def parse_solution_details(url):
         # Extract the description - try multiple approaches
         description_found = False
         
+        # 0. Look for the specific div class structure with XPath
+        try:
+            description_div = soup.find('div', class_='product-catalogue-training-calendar__row typ')
+            if description_div:
+                p = description_div.find('p')
+                if p:
+                    solution_detail['description'] = p.get_text().strip()
+                    description_found = True
+                    print("Found description in product-catalogue-training-calendar__row")
+        except Exception as e:
+            print(f"Error in XPath description extraction: {e}")
+        
         # 1. Look for the main content div that might contain the description
-        main_content = soup.find('div', class_=lambda c: c and ('main-content' in c.lower() or 'product-details' in c.lower()))
-        if main_content:
-            # Try to find a section with "Description" header or similar
-            for header in main_content.find_all(['h1', 'h2', 'h3', 'h4', 'strong']):
-                if 'description' in header.text.lower() or 'about this solution' in header.text.lower():
-                    # Get the paragraphs after this header
-                    description_text = []
-                    next_elem = header.find_next(['p', 'div'])
-                    while next_elem and next_elem.name in ['p', 'div'] and not next_elem.find(['h1', 'h2', 'h3', 'h4']):
-                        description_text.append(next_elem.get_text().strip())
-                        next_elem = next_elem.find_next_sibling()
-                    
-                    if description_text:
-                        solution_detail['description'] = ' '.join(description_text)
-                        description_found = True
-                        break
+        if not description_found:
+            main_content = soup.find('div', class_=lambda c: c and ('main-content' in c.lower() or 'product-details' in c.lower()))
+            if main_content:
+                # Try to find a section with "Description" header or similar
+                for header in main_content.find_all(['h1', 'h2', 'h3', 'h4', 'strong']):
+                    if 'description' in header.text.lower() or 'about this solution' in header.text.lower():
+                        # Get the paragraphs after this header
+                        description_text = []
+                        next_elem = header.find_next(['p', 'div'])
+                        while next_elem and next_elem.name in ['p', 'div'] and not next_elem.find(['h1', 'h2', 'h3', 'h4']):
+                            description_text.append(next_elem.get_text().strip())
+                            next_elem = next_elem.find_next_sibling()
+                        
+                        if description_text:
+                            solution_detail['description'] = ' '.join(description_text)
+                            description_found = True
+                            print("Found description in main content section")
+                            break
         
         # 2. Try finding by class or section containing "description"
         if not description_found:
@@ -313,6 +329,7 @@ def parse_solution_details(url):
             if description_section:
                 solution_detail['description'] = description_section.get_text().strip()
                 description_found = True
+                print("Found description in description section")
         
         # 3. Look for sections with specific pattern - Description: or Description followed by text
         if not description_found:
@@ -321,6 +338,7 @@ def parse_solution_details(url):
                 if text.startswith('Description:') or text.startswith('Description -') or 'solution description' in text.lower():
                     solution_detail['description'] = text.split(':', 1)[1].strip() if ':' in text else text.split('-', 1)[1].strip()
                     description_found = True
+                    print("Found description in text pattern")
                     break
         
         # 4. Try to extract description from meta tags
@@ -329,13 +347,33 @@ def parse_solution_details(url):
             if meta_desc and 'content' in meta_desc.attrs:
                 solution_detail['description'] = meta_desc['content']
                 description_found = True
-                
+                print("Found description in meta tags")
+        
         # 5. Look for the first substantial paragraph in the main content area
         if not description_found and main_content:
             paragraphs = main_content.find_all('p', recursive=False)
             if paragraphs and len(paragraphs[0].get_text().strip()) > 50:  # At least 50 chars to be substantial
                 solution_detail['description'] = paragraphs[0].get_text().strip()
                 description_found = True
+                print("Found description in first substantial paragraph")
+        
+        # 6. As a last resort, try to find any paragraph with substantial content
+        if not description_found:
+            for p in soup.find_all('p'):
+                text = p.get_text().strip()
+                if len(text) > 100:  # Look for paragraphs with more than 100 characters
+                    solution_detail['description'] = text
+                    description_found = True
+                    print("Found description in substantial paragraph")
+                    break
+        
+        # Clean up the description
+        if solution_detail['description']:
+            # Remove extra whitespace
+            solution_detail['description'] = ' '.join(solution_detail['description'].split())
+            # Remove any HTML tags that might have been missed
+            solution_detail['description'] = BeautifulSoup(solution_detail['description'], 'html.parser').get_text()
+            print(f"Final description length: {len(solution_detail['description'])} characters")
         
         # Extract job levels - try multiple approaches
         # 1. Look for a section with "Job Levels" header
@@ -602,63 +640,56 @@ def scrape_shl_catalog():
     
     # Scrape packaged solutions
     print("Scraping packaged solutions...")
-    for url in PACKAGED_SOLUTIONS_PAGES:
-        try:
-            print(f"\nScraping {url}")
-            soup = get_page_content(url)
-            page_solutions = parse_catalog_page(soup, 'packaged')
-            if page_solutions:
-                print(f"Found {len(page_solutions)} packaged solutions on page")
-                # Label each solution with its type
-                for solution in page_solutions:
-                    solution['category'] = 'Pre-packaged Job Solutions'
-                # Add the new solutions and remove duplicates
-                packaged_solutions = merge_solutions(packaged_solutions, page_solutions)
-                # Save progress after each page
-                save_to_json(packaged_solutions, 'data/packaged_solutions.json')
-                save_to_mongodb(packaged_solutions, MONGO_COLLECTION_PACKAGED)
-            else:
-                print(f"No packaged solutions found on {url}")
-            # Be nice to the server
-            time.sleep(2)  # Increased delay to avoid rate limiting
-        except Exception as e:
-            print(f"Error processing {url}: {e}")
-            # Continue with next URL
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = []
+        for url in PACKAGED_SOLUTIONS_PAGES:
+            futures.append(executor.submit(process_catalog_page, url, 'packaged'))
+        
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                page_solutions = future.result()
+                if page_solutions:
+                    print(f"Found {len(page_solutions)} packaged solutions on page")
+                    # Label each solution with its type
+                    for solution in page_solutions:
+                        solution['category'] = 'Pre-packaged Job Solutions'
+                    # Add the new solutions and remove duplicates
+                    packaged_solutions = merge_solutions(packaged_solutions, page_solutions)
+                    # Save progress after each page
+                    save_to_json(packaged_solutions, 'data/packaged_solutions.json')
+                    save_to_mongodb(packaged_solutions, MONGO_COLLECTION_PACKAGED)
+            except Exception as e:
+                print(f"Error processing page: {e}")
     
     # Scrape individual solutions
     print("\nScraping individual solutions...")
-    for url in INDIVIDUAL_SOLUTIONS_PAGES:
-        try:
-            print(f"\nScraping {url}")
-            soup = get_page_content(url)
-            page_solutions = parse_catalog_page(soup, 'individual')
-            if page_solutions:
-                print(f"Found {len(page_solutions)} individual solutions on page")
-                # Label each solution with its type
-                for solution in page_solutions:
-                    solution['category'] = 'Individual Test Solutions'
-                # Add the new solutions and remove duplicates
-                individual_solutions = merge_solutions(individual_solutions, page_solutions)
-                # Save progress after each page
-                save_to_json(individual_solutions, 'data/individual_solutions.json')
-                save_to_mongodb(individual_solutions, MONGO_COLLECTION_INDIVIDUAL)
-            else:
-                print(f"No individual solutions found on {url}")
-            # Be nice to the server
-            time.sleep(2)  # Increased delay to avoid rate limiting
-        except Exception as e:
-            print(f"Error processing {url}: {e}")
-            # Continue with next URL
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = []
+        for url in INDIVIDUAL_SOLUTIONS_PAGES:
+            futures.append(executor.submit(process_catalog_page, url, 'individual'))
+        
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                page_solutions = future.result()
+                if page_solutions:
+                    print(f"Found {len(page_solutions)} individual solutions on page")
+                    # Label each solution with its type
+                    for solution in page_solutions:
+                        solution['category'] = 'Individual Test Solutions'
+                    # Add the new solutions and remove duplicates
+                    individual_solutions = merge_solutions(individual_solutions, page_solutions)
+                    # Save progress after each page
+                    save_to_json(individual_solutions, 'data/individual_solutions.json')
+                    save_to_mongodb(individual_solutions, MONGO_COLLECTION_INDIVIDUAL)
+            except Exception as e:
+                print(f"Error processing page: {e}")
     
-    # Always scrape details for all solutions, even if they have some details already
-    # as the duration_minutes might be missing
+    # Process details concurrently
     print("\nScraping detailed information for all solutions...")
     
-    # Process packaged solutions first
-    print(f"\nProcessing {len(packaged_solutions)} packaged solutions...")
-    for i, solution in enumerate(packaged_solutions):
+    def process_solution_details(solution, solution_type):
         try:
-            print(f"\nScraping details for {solution['name']} ({i+1}/{len(packaged_solutions)})")
+            print(f"\nScraping details for {solution['name']}")
             details = parse_solution_details(solution['url'])
             
             # Update existing details with new information
@@ -666,55 +697,47 @@ def scrape_shl_catalog():
                 # For non-empty values, replace existing data
                 if value or key not in solution:
                     solution[key] = value
-                    
+            
             # Ensure we have category and solution_type
-            solution['category'] = 'Pre-packaged Job Solutions'
-            solution['solution_type'] = 'packaged'
+            solution['category'] = 'Pre-packaged Job Solutions' if solution_type == 'packaged' else 'Individual Test Solutions'
+            solution['solution_type'] = solution_type
             
-            # Save progress periodically
-            if (i + 1) % 5 == 0:
-                save_to_json(packaged_solutions, 'data/packaged_solutions.json')
-                save_to_mongodb(packaged_solutions, MONGO_COLLECTION_PACKAGED)
-            
-            # Be nice to the server
-            time.sleep(2)
+            return solution
         except Exception as e:
             print(f"Error getting details for {solution['name']}: {e}")
-            # Continue with next solution
+            return solution
     
-    # Save final results for packaged solutions
-    save_to_json(packaged_solutions, 'data/packaged_solutions.json')
-    save_to_mongodb(packaged_solutions, MONGO_COLLECTION_PACKAGED)
+    # Process packaged solutions
+    print(f"\nProcessing {len(packaged_solutions)} packaged solutions...")
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(process_solution_details, solution, 'packaged') for solution in packaged_solutions]
+        for i, future in enumerate(concurrent.futures.as_completed(futures)):
+            try:
+                packaged_solutions[i] = future.result()
+                # Save progress periodically
+                if (i + 1) % 5 == 0:
+                    save_to_json(packaged_solutions, 'data/packaged_solutions.json')
+                    save_to_mongodb(packaged_solutions, MONGO_COLLECTION_PACKAGED)
+            except Exception as e:
+                print(f"Error processing solution: {e}")
     
     # Process individual solutions
     print(f"\nProcessing {len(individual_solutions)} individual solutions...")
-    for i, solution in enumerate(individual_solutions):
-        try:
-            print(f"\nScraping details for {solution['name']} ({i+1}/{len(individual_solutions)})")
-            details = parse_solution_details(solution['url'])
-            
-            # Update existing details with new information
-            for key, value in details.items():
-                # For non-empty values, replace existing data
-                if value or key not in solution:
-                    solution[key] = value
-            
-            # Ensure we have category and solution_type
-            solution['category'] = 'Individual Test Solutions'
-            solution['solution_type'] = 'individual'
-            
-            # Save progress periodically
-            if (i + 1) % 5 == 0:
-                save_to_json(individual_solutions, 'data/individual_solutions.json')
-                save_to_mongodb(individual_solutions, MONGO_COLLECTION_INDIVIDUAL)
-            
-            # Be nice to the server
-            time.sleep(2)
-        except Exception as e:
-            print(f"Error getting details for {solution['name']}: {e}")
-            # Continue with next solution
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(process_solution_details, solution, 'individual') for solution in individual_solutions]
+        for i, future in enumerate(concurrent.futures.as_completed(futures)):
+            try:
+                individual_solutions[i] = future.result()
+                # Save progress periodically
+                if (i + 1) % 5 == 0:
+                    save_to_json(individual_solutions, 'data/individual_solutions.json')
+                    save_to_mongodb(individual_solutions, MONGO_COLLECTION_INDIVIDUAL)
+            except Exception as e:
+                print(f"Error processing solution: {e}")
     
-    # Save final results for individual solutions
+    # Save final results
+    save_to_json(packaged_solutions, 'data/packaged_solutions.json')
+    save_to_mongodb(packaged_solutions, MONGO_COLLECTION_PACKAGED)
     save_to_json(individual_solutions, 'data/individual_solutions.json')
     save_to_mongodb(individual_solutions, MONGO_COLLECTION_INDIVIDUAL)
     
@@ -730,6 +753,17 @@ def scrape_shl_catalog():
         'packaged': packaged_solutions,
         'individual': individual_solutions
     }
+
+def process_catalog_page(url, solution_type):
+    """Process a single catalog page."""
+    try:
+        print(f"\nScraping {url}")
+        soup = get_page_content(url)
+        page_solutions = parse_catalog_page(soup, solution_type)
+        return page_solutions
+    except Exception as e:
+        print(f"Error processing {url}: {e}")
+        return []
 
 def preprocess_assessments(assessments):
     """Clean and preprocess assessment data."""

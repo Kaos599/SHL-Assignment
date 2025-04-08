@@ -16,13 +16,13 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # API endpoint - Allow switching between local and production with environment variable
-API_ENDPOINT = "https://shl-assignment-j6l4.onrender.com"
+API_ENDPOINT = "http://localhost:8000"
 
-# # If API_ENDPOINT doesn't include http(s)://, add it
-# if not API_ENDPOINT.startswith("http"):
-#     API_ENDPOINT = f"http://{API_ENDPOINT}"
+# If API_ENDPOINT doesn't include http(s)://, add it
+if not API_ENDPOINT.startswith("http"):
+    API_ENDPOINT = f"http://{API_ENDPOINT}"
 
-# logger.info(f"Using API endpoint: {API_ENDPOINT}")
+logger.info(f"Using API endpoint: {API_ENDPOINT}")
 
 # Set page configuration
 st.set_page_config(
@@ -32,21 +32,93 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Set dark theme
+# Custom CSS for better styling
 st.markdown("""
 <style>
     .stApp {
-        background-color: #262730;  /* backgroundColor */
-        color: #FFFFFF;              /* textColor */
+        background-color: #262730;
+        color: #FFFFFF;
     }
-    .main-header { font-size: 2.5rem; color: #FFFFFF; }
-    .sub-header { font-size: 1.5rem; color: #66B2FF; margin-bottom: 2rem; }
-    .recommendation-card { padding: 1.5rem; border-radius: 0.5rem; background-color: #323742; margin-bottom: 1rem; }
-    .recommendation-title { font-size: 1.2rem; font-weight: bold; color: #FFFFFF; }
-    .recommendation-detail { margin-top: 0.5rem; color: #D1D5DB; }
-    .yes-badge { background-color: #10B981; color: white; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.8rem; }
-    .no-badge { background-color: #F87171; color: white; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.8rem; }
-    .score-badge { background-color: #3B82F6; color: white; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.8rem; }
+    .main-header { 
+        font-size: 2.5rem; 
+        color: #FFFFFF;
+        text-align: center;
+        margin-bottom: 0.5rem;
+    }
+    .sub-header { 
+        font-size: 1.5rem; 
+        color: #66B2FF; 
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .author-info {
+        text-align: center;
+        color: #A0AEC0;
+        margin-bottom: 2rem;
+    }
+    .notice-box {
+        background-color: #2D3748;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+        border-left: 4px solid #ECC94B;
+    }
+    .recommendation-card { 
+        padding: 1.5rem; 
+        border-radius: 0.5rem; 
+        background-color: #323742; 
+        margin-bottom: 1rem;
+        transition: transform 0.2s;
+    }
+    .recommendation-card:hover {
+        transform: translateY(-2px);
+    }
+    .recommendation-title { 
+        font-size: 1.2rem; 
+        font-weight: bold; 
+        color: #FFFFFF; 
+        margin-bottom: 0.5rem;
+    }
+    .recommendation-detail { 
+        margin-top: 0.5rem; 
+        color: #D1D5DB;
+        line-height: 1.5;
+    }
+    .yes-badge { 
+        background-color: #10B981; 
+        color: white; 
+        padding: 0.25rem 0.5rem; 
+        border-radius: 0.25rem; 
+        font-size: 0.8rem;
+        margin-right: 0.5rem;
+    }
+    .no-badge { 
+        background-color: #F87171; 
+        color: white; 
+        padding: 0.25rem 0.5rem; 
+        border-radius: 0.25rem; 
+        font-size: 0.8rem;
+        margin-right: 0.5rem;
+    }
+    .score-badge { 
+        background-color: #3B82F6; 
+        color: white; 
+        padding: 0.25rem 0.5rem; 
+        border-radius: 0.25rem; 
+        font-size: 0.8rem;
+    }
+    .stButton>button {
+        width: 100%;
+        background-color: #4299E1;
+        color: white;
+        border: none;
+        padding: 0.5rem 1rem;
+        border-radius: 0.25rem;
+        font-weight: bold;
+    }
+    .stButton>button:hover {
+        background-color: #3182CE;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -76,20 +148,40 @@ def get_recommendations_from_api(query, url=None, max_results=10):
         return None
 
 def main():
-    # Header
+    # Header and Author Information
     st.markdown('<div class="main-header">SHL Assessment Recommender</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Find the perfect assessments for your hiring needs</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">For AI Research Intern Position in SHL</div>', unsafe_allow_html=True)
+    st.markdown('<div class="author-info">Made by Harsh Dayal<br>(harshdayal13@gmail.com)</div>', unsafe_allow_html=True)
+    
+    # Notice about API loading time
+    st.markdown("""
+    <div class="notice-box">
+        <strong>⚠️ Notice:</strong> I am using Render's free tier to deploy my API so the API might take a minute or two to load up before it can start receiving requests. Please be patient.
+    </div>
+    """, unsafe_allow_html=True)
     
     # Sidebar for information
     with st.sidebar:
         st.subheader("About")
-        st.write("""This tool helps hiring managers find the most relevant SHL assessments for their job openings. Enter your job description or requirements, and we'll recommend the best assessments for your needs.""")
+        st.write("""
+        This tool helps hiring managers find the most relevant SHL assessments for their job openings. 
+        Enter your job description or requirements, and we'll recommend the best assessments for your needs.
+        """)
         
         st.subheader("How it works")
-        st.write("""1. Enter a job description or requirements. 2. Optionally provide a job posting URL. 3. Our AI analyzes your input and matches it with SHL assessments. 4. Review recommended assessments and their details.""")
+        st.write("""
+        1. Enter a job description or requirements
+        2. Optionally provide a job posting URL
+        3. Our AI analyzes your input and matches it with SHL assessments
+        4. Review recommended assessments and their details
+        """)
         
         st.subheader("Example queries")
-        st.markdown("""- I am hiring for Java developers who can collaborate effectively with business teams. - Looking for an assessment for Python, SQL, and JavaScript skills under 60 minutes. - Need a cognitive assessment for a data analyst position.""")
+        st.markdown("""
+        - I am hiring for Java developers who can collaborate effectively with business teams
+        - Looking for an assessment for Python, SQL, and JavaScript skills under 60 minutes
+        - Need a cognitive assessment for a data analyst position
+        """)
         
         # Display API endpoint (helpful for debugging)
         st.subheader("Settings")
@@ -101,11 +193,23 @@ def main():
     col1, col2 = st.columns([3, 1])
     
     with col1:
-        query = st.text_area("Enter job description or requirements:", height=150, placeholder="E.g., I'm hiring for Java developers who can collaborate effectively with business teams.")
+        query = st.text_area(
+            "Enter job description or requirements:",
+            height=150,
+            placeholder="E.g., I'm hiring for Java developers who can collaborate effectively with business teams."
+        )
     
     with col2:
-        url = st.text_input("Job posting URL (optional):", placeholder="https://example.com/job-posting")
-        max_results = st.slider("Maximum results:", min_value=1, max_value=10, value=5)
+        url = st.text_input(
+            "Job posting URL (optional):",
+            placeholder="https://example.com/job-posting"
+        )
+        max_results = st.slider(
+            "Maximum results:",
+            min_value=1,
+            max_value=10,
+            value=5
+        )
     
     # Submit button
     if st.button("Get Recommendations", type="primary"):
@@ -134,7 +238,10 @@ def main():
             # Display natural language response if available
             if results.get('natural_language_response'):
                 st.markdown("### Analysis")
-                st.markdown(f'<div style="background-color: #404452; padding: 15px; border-radius: 10px; margin-bottom: 20px; color: #D1D5DB;">{results["natural_language_response"]}</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div style="background-color: #404452; padding: 15px; border-radius: 10px; margin-bottom: 20px; color: #D1D5DB;">{results["natural_language_response"]}</div>',
+                    unsafe_allow_html=True
+                )
             
             for rec in results['recommendations']:
                 with st.container():
@@ -143,13 +250,13 @@ def main():
                         <div class="recommendation-title">{rec.get('name', 'Unknown')}</div>
                         <div class="recommendation-detail">
                             <strong>Test Type:</strong> {rec.get('test_type', 'Unknown')} | 
-                            <strong>Duration:</strong> {rec.get('duration', 'Unknown')} | 
+                            <strong>Duration:</strong> {rec.get('duration_minutes', 'Unknown')} minutes | 
                             <span class="{'yes-badge' if rec.get('remote_testing') == 'Yes' else 'no-badge'}">Remote Testing: {rec.get('remote_testing', 'No')}</span> | 
                             <span class="{'yes-badge' if rec.get('adaptive_irt') == 'Yes' else 'no-badge'}">Adaptive: {rec.get('adaptive_irt', 'No')}</span> | 
                             <span class="score-badge">Relevance: {rec.get('score', 0)}</span>
                         </div>
                         <div class="recommendation-detail">
-                            <a href="{rec.get('url', '#')}" target="_blank">View Assessment Details</a>
+                            <a href="{rec.get('url', '#')}" target="_blank" style="color: #4299E1; text-decoration: none;">View Assessment Details →</a>
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
@@ -157,13 +264,13 @@ def main():
             # Show as a dataframe for easy comparison
             with st.expander("View as table"):
                 df = pd.DataFrame(results['recommendations'])
-                columns_to_show = ['name', 'test_type', 'duration', 'remote_testing', 'adaptive_irt', 'score']
+                columns_to_show = ['name', 'test_type', 'duration_minutes', 'remote_testing', 'adaptive_irt', 'score']
                 columns_to_show = [col for col in columns_to_show if col in df.columns]
                 df = df[columns_to_show]
                 column_names = {
                     'name': 'Assessment', 
                     'test_type': 'Test Type', 
-                    'duration': 'Duration', 
+                    'duration_minutes': 'Duration (minutes)', 
                     'remote_testing': 'Remote Testing', 
                     'adaptive_irt': 'Adaptive/IRT', 
                     'score': 'Relevance Score'

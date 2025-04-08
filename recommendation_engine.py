@@ -127,6 +127,19 @@ class SHLRecommendationEngine:
             
             df = pd.DataFrame(data)
             
+            # Load embeddings from MongoDB
+            try:
+                embeddings_collection = db[MONGO_EMBEDDINGS_COLLECTION]
+                embeddings_data = {}
+                for doc in embeddings_collection.find():
+                    embeddings_data[doc['assessment_id']] = doc['embedding']
+                
+                # Add embeddings to dataframe
+                df['embedding'] = df['_id'].astype(str).map(embeddings_data)
+                print(f"Loaded {len(embeddings_data)} embeddings from MongoDB")
+            except Exception as e:
+                print(f"Error loading embeddings: {e}")
+            
             print(f"Successfully loaded {len(df)} assessments from MongoDB")
             return df
         except Exception as e:
@@ -171,33 +184,17 @@ class SHLRecommendationEngine:
                 self.index = faiss.read_index('data/assessment_index.faiss')
                 print(f"Loaded FAISS index with {self.index.ntotal} vectors of dimension {self.index.d}")
                 
-                # Check if we have embeddings in the dataframe
-                if 'embedding' not in self.assessments_df.columns and not self.skip_embedding_creation:
-                    print("No embeddings found in dataframe. Creating embeddings...")
-                    self.create_embeddings()
-                    
-                # Test a sample embedding to verify dimensions match
-                if not self.skip_embedding_creation:
-                    self.test_index_compatibility()
-            else:
-                if self.skip_embedding_creation:
-                    print("No FAISS index found but skip_embedding_creation is enabled.")
-                    print("Cannot proceed without either index or ability to create embeddings.")
-                    raise ValueError("No FAISS index found with skip_embedding_creation enabled")
-                else:
-                    print("No FAISS index found. Creating embeddings and index...")
-                    self.create_embeddings()
+                # Check if dimensions match
+                if self.index.d != 768:  # Gemini embedding dimension
+                    print("Index dimension mismatch. Recreating index...")
                     self.create_faiss_index()
-        except Exception as e:
-            if self.skip_embedding_creation:
-                print(f"Error loading FAISS index: {e}")
-                print("Cannot create embeddings because skip_embedding_creation is enabled.")
-                raise ValueError("Failed to load index with skip_embedding_creation enabled") from e
             else:
-                print(f"Error loading FAISS index: {e}")
-                print("Creating new embeddings and index...")
-                self.create_embeddings()
+                print("No FAISS index found. Creating new index...")
                 self.create_faiss_index()
+        except Exception as e:
+            print(f"Error loading FAISS index: {e}")
+            print("Creating new index...")
+            self.create_faiss_index()
     
     def test_index_compatibility(self):
         """Test compatibility between the loaded index and the embeddings."""
@@ -260,6 +257,7 @@ class SHLRecommendationEngine:
             
             print(f"Creating FAISS index with {len(embeddings)} embeddings of dimension {dimension}")
             
+            # Create index with correct dimension
             self.index = faiss.IndexFlatIP(dimension)
             faiss.normalize_L2(embedding_matrix)
             self.index.add(embedding_matrix)
@@ -278,7 +276,17 @@ class SHLRecommendationEngine:
         
         self.query_template = PromptTemplate(
             input_variables=["query"],
-            template="""You are a job assessment specialist. Enhance the following job description or query to include key skills, competencies, and assessment needs relevant for matching with SHL assessments. Original Query: {query} Enhanced Query:"""
+            template="""You are a job assessment specialist. Enhance the following job description or query to include key skills, competencies, and assessment needs relevant for matching with SHL assessments. Focus on:
+
+1. Job level (entry-level, mid-level, senior, etc.)
+2. Specific role requirements (managerial, technical, customer service, etc.)
+3. Required skills and competencies
+4. Assessment preferences (duration, test types, etc.)
+5. Language requirements
+
+Original Query: {query}
+
+Enhanced Query:"""
         )
         
         self.query_chain = self.query_template | self.llm | StrOutputParser()
@@ -292,33 +300,102 @@ class SHLRecommendationEngine:
             print(f"Error enhancing query: {e}")
             return query
     
-    def extract_duration_constraint(self, query):
-        """Extract any time/duration constraint from the query."""
-        time_patterns = [
-            r"(\d+)\s*minutes",
-            r"(\d+)\s*mins",
-            r"within\s*(\d+)",
-            r"less than\s*(\d+)",
-            r"max.*?(\d+)",
-            r"maximum.*?(\d+)",
-            r'under (\d+)\s*(?:minute|min)',
-            r'shorter than (\d+)\s*(?:minute|min)',
-            r'(\d+)\s*(?:minute|min) or less',
-            r'no longer than (\d+)\s*(?:minute|min)',
-            r'no more than (\d+)\s*(?:minute|min)',
-            r'(\d+)\s*(?:minute|min) maximum',
-            r'up to (\d+)\s*(?:minute|min)'
-        ]
-        
-        for pattern in time_patterns:
-            matches = re.findall(pattern, query.lower())
-            if matches:
+    def understand_query_with_gemini(self, query):
+        """Use Gemini to understand the query and extract structured information."""
+        try:
+            prompt = f"""
+            You are an expert at understanding job assessment queries. Analyze the following query and extract:
+            1. Duration constraints (in minutes)
+            2. Required skills
+            3. Job level
+            4. Test type preferences
+            
+            Return the information in JSON format with these fields:
+            - duration_minutes: number or null
+            - skills: list of strings
+            - job_level: string or null
+            - test_types: list of strings
+            
+            Query: {query}
+            
+            Respond with ONLY the JSON object, no other text.
+            """
+            
+            model = genai.ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=GOOGLE_API_KEY)
+            response = model.invoke(prompt)
+            
+            if hasattr(response, 'content') and response.content:
                 try:
-                    return int(matches[0])
-                except:
-                    pass
-        
-        return None
+                    return json.loads(response.content)
+                except json.JSONDecodeError:
+                    print(f"Failed to parse Gemini response as JSON: {response.content}")
+                    return {"duration_minutes": None, "skills": [], "job_level": None, "test_types": []}
+            return {"duration_minutes": None, "skills": [], "job_level": None, "test_types": []}
+        except Exception as e:
+            print(f"Error using Gemini for query understanding: {e}")
+            return {"duration_minutes": None, "skills": [], "job_level": None, "test_types": []}
+    
+    def extract_duration_constraint(self, query):
+        """Extract any time/duration constraint from the query using Gemini."""
+        try:
+            # Get structured understanding from Gemini
+            query_info = self.understand_query_with_gemini(query)
+            
+            # Extract duration if available
+            duration = query_info.get("duration_minutes")
+            if duration is not None:
+                print(f"Gemini detected duration: {duration} minutes")
+                return duration
+            
+            # Fallback to regex patterns if Gemini didn't find duration
+            time_patterns = [
+                # Hour-based patterns (check these first)
+                r'(\d+)\s*hour',
+                r'(\d+)\s*hr',
+                r'less than\s*(\d+)\s*hour',
+                r'under\s*(\d+)\s*hour',
+                r'no more than\s*(\d+)\s*hour',
+                r'up to\s*(\d+)\s*hour',
+                r'(\d+)\s*hour or less',
+                r'no longer than\s*(\d+)\s*hour',
+                r'(\d+)\s*hour maximum',
+                
+                # Minute-based patterns (check these second)
+                r'(\d+)\s*(?:minute|min)',
+                r'(\d+)\s*mins',
+                r'within\s*(\d+)',
+                r'less than\s*(\d+)',
+                r'max.*?(\d+)',
+                r'maximum.*?(\d+)',
+                r'under (\d+)\s*(?:minute|min)',
+                r'shorter than (\d+)\s*(?:minute|min)',
+                r'(\d+)\s*(?:minute|min) or less',
+                r'no longer than (\d+)\s*(?:minute|min)',
+                r'no more than (\d+)\s*(?:minute|min)',
+                r'(\d+)\s*(?:minute|min) maximum',
+                r'up to (\d+)\s*(?:minute|min)'
+            ]
+            
+            # Check hour patterns first (first 9 patterns)
+            for i, pattern in enumerate(time_patterns):
+                matches = re.findall(pattern, query.lower())
+                if matches:
+                    try:
+                        duration = int(matches[0])
+                        # Convert hours to minutes if the pattern was hour-based (first 9 patterns)
+                        if i < 9:  # First 9 patterns are hour-based
+                            print(f"Found hour-based duration: {duration} hours")
+                            duration *= 60
+                        else:
+                            print(f"Found minute-based duration: {duration} minutes")
+                        return duration
+                    except:
+                        pass
+            
+            return None
+        except Exception as e:
+            print(f"Error extracting duration constraint: {e}")
+            return None
     
     def extract_skills(self, query):
         """Extract key skills mentioned in the query."""
@@ -367,40 +444,47 @@ class SHLRecommendationEngine:
     
     def prepare_text_for_embedding(self, row):
         """Prepare text for embedding by combining relevant fields."""
-        text_fields = []
+        # Helper function to safely convert to list
+        def safe_to_list(value):
+            if value is None:
+                return []
+            if isinstance(value, (list, tuple)):
+                return value
+            if isinstance(value, str):
+                return [value]
+            return [str(value)]
+
+        fields = [
+            str(row.get('name', '')),
+            str(row.get('description', '')),
+            str(row.get('category', '')),
+            ' '.join(safe_to_list(row.get('job_levels'))),
+            ' '.join(safe_to_list(row.get('test_type_names'))),
+            ' '.join(safe_to_list(row.get('languages'))),
+            str(row.get('duration_minutes', '')),
+            str(row.get('adaptive_irt', '')),
+            str(row.get('remote_testing', ''))
+        ]
         
-        # Add name
-        if 'name' in row and row['name']:
-            text_fields.append(f"Name: {row['name']}")
+        # Add specific role-related keywords if present in name or description
+        role_keywords = ['manager', 'supervisor', 'lead', 'director', 'coordinator', 'specialist', 'analyst', 'developer']
+        for keyword in role_keywords:
+            if keyword in str(row.get('name', '')).lower() or keyword in str(row.get('description', '')).lower():
+                fields.append(keyword)
         
-        # Add description
-        if 'description' in row and row['description']:
-            text_fields.append(f"Description: {row['description']}")
+        # Add test type keywords
+        test_type_keywords = ['personality', 'cognitive', 'skills', 'knowledge', 'behavioral', 'situational', 'judgment']
+        for keyword in test_type_keywords:
+            if keyword in ' '.join(safe_to_list(row.get('test_type_names'))).lower():
+                fields.append(keyword)
         
-        # Add test types
-        if 'test_type_names' in row and row['test_type_names']:
-            test_types = ', '.join(row['test_type_names'])
-            text_fields.append(f"Test Types: {test_types}")
+        # Combine all fields with proper spacing
+        text = ' '.join(str(field) for field in fields if field)
         
-        # Add job levels if available
-        if 'job_levels' in row and row['job_levels']:
-            job_levels = ', '.join(row['job_levels'])
-            text_fields.append(f"Job Levels: {job_levels}")
+        # Remove extra whitespace and normalize
+        text = ' '.join(text.split())
         
-        # Add duration
-        if 'duration_minutes' in row and row['duration_minutes']:
-            text_fields.append(f"Duration: {row['duration_minutes']} minutes")
-        
-        # Add solution type if available
-        if 'solution_type' in row and row['solution_type']:
-            text_fields.append(f"Solution Type: {row['solution_type']}")
-            
-        # Add category if available
-        if 'category' in row and row['category']:
-            text_fields.append(f"Category: {row['category']}")
-        
-        # Join all fields with spaces
-        return ' '.join(text_fields)
+        return text
     
     def recommend(self, query, url=None, top_k=10):
         """
@@ -428,7 +512,10 @@ class SHLRecommendationEngine:
             
             # Extract duration constraint
             duration_constraint = self.extract_duration_constraint(query)
-            print(f"Duration constraint: {duration_constraint} minutes")
+            if duration_constraint:
+                print(f"Duration constraint: {duration_constraint} minutes (equivalent to {duration_constraint/60:.1f} hours)")
+            else:
+                print("No duration constraint detected")
             
             # Extract skills
             skills = self.extract_skills(query)
@@ -469,6 +556,7 @@ class SHLRecommendationEngine:
                     
                     # Apply duration constraint if specified
                     if duration_constraint and duration_constraint > 0:
+                        original_count = len(recommendations)
                         filtered_recommendations = []
                         for rec in recommendations:
                             # Check if duration is within the constraint
@@ -477,9 +565,13 @@ class SHLRecommendationEngine:
                                 filtered_recommendations.append(rec)
                         
                         if filtered_recommendations:
+                            print(f"Filtered from {original_count} to {len(filtered_recommendations)} recommendations based on duration constraint of {duration_constraint} minutes")
                             recommendations = filtered_recommendations
                         else:
-                            print(f"No recommendations match the duration constraint of {duration_constraint} minutes")
+                            print(f"Warning: No recommendations match the strict duration constraint of {duration_constraint} minutes.")
+                            print(f"Returning all recommendations and sorting by duration.")
+                            # Sort by duration as a fallback
+                            recommendations = sorted(recommendations, key=lambda x: x.get('duration_minutes', float('inf')))
                     
                     # Sort by similarity score
                     recommendations = sorted(recommendations, key=lambda x: x.get('score', 0), reverse=True)
@@ -530,6 +622,7 @@ class SHLRecommendationEngine:
             
             # Apply duration constraint if specified
             if duration_constraint and duration_constraint > 0:
+                original_count = len(recommendations)
                 filtered_recommendations = []
                 for rec in recommendations:
                     duration = rec.get('duration_minutes', 0)
@@ -537,7 +630,13 @@ class SHLRecommendationEngine:
                         filtered_recommendations.append(rec)
                 
                 if filtered_recommendations:
+                    print(f"Filtered from {original_count} to {len(filtered_recommendations)} recommendations based on duration constraint of {duration_constraint} minutes")
                     recommendations = filtered_recommendations
+                else:
+                    print(f"Warning: No recommendations match the strict duration constraint of {duration_constraint} minutes.")
+                    print(f"Returning all recommendations and sorting by duration.")
+                    # Sort by duration as a fallback
+                    recommendations = sorted(recommendations, key=lambda x: x.get('duration_minutes', float('inf')))
             
             # Sort by similarity score
             recommendations = sorted(recommendations, key=lambda x: x.get('score', 0), reverse=True)
