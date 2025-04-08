@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # API endpoint - Allow switching between local and production with environment variable
-API_ENDPOINT = "http://localhost:8000"
+API_ENDPOINT = "https://shl-assignment-j6l4.onrender.com"
 
 # If API_ENDPOINT doesn't include http(s)://, add it
 if not API_ENDPOINT.startswith("http"):
