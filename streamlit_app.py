@@ -15,8 +15,14 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
-# API endpoint
+# API endpoint - Allow switching between local and production with environment variable
 API_ENDPOINT = "https://shl-assignment-j6l4.onrender.com"
+
+# # If API_ENDPOINT doesn't include http(s)://, add it
+# if not API_ENDPOINT.startswith("http"):
+#     API_ENDPOINT = f"http://{API_ENDPOINT}"
+
+# logger.info(f"Using API endpoint: {API_ENDPOINT}")
 
 # Set page configuration
 st.set_page_config(
@@ -57,6 +63,7 @@ def get_recommendations_from_api(query, url=None, max_results=10):
             payload["url"] = url
             
         # Make the API request
+        logger.info(f"Sending request to {API_ENDPOINT}/recommend")
         response = requests.post(f"{API_ENDPOINT}/recommend", json=payload)
         response.raise_for_status()  # Raise exception for HTTP errors
         
@@ -83,6 +90,10 @@ def main():
         
         st.subheader("Example queries")
         st.markdown("""- I am hiring for Java developers who can collaborate effectively with business teams. - Looking for an assessment for Python, SQL, and JavaScript skills under 60 minutes. - Need a cognitive assessment for a data analyst position.""")
+        
+        # Display API endpoint (helpful for debugging)
+        st.subheader("Settings")
+        st.text(f"API: {API_ENDPOINT}")
     
     # Input section
     st.subheader("What are you looking for?")

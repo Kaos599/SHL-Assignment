@@ -35,9 +35,21 @@ build/
 
 
 
-data/
+
 data/individual_solutions.json
 data/packaged_solutions.json
 data/shl_assessments.json
 data/shl_assessments_solutions.json
 data/individual_solutions.json
+data/shl_assessments_solutions.json
+data/azure_assessments.json
+data/azure_assessments_solutions.json
+data/shl_firecrawl_data.json
+data/test_extraction_results.json
+data\debug_individual_1744009878.html
+data\debug_individual_1744021481.html
+data\azure_openai_info.pkl
+data\processed_assessments.json
+data/debug_individual_1744009878.html
+data/debug_individual_1744021481.html
+data/processed_assessments.json
