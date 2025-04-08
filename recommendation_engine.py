@@ -523,227 +523,83 @@ Enhanced Query:"""
         return text
     
     def recommend(self, query, url=None, top_k=10):
-        """
-        Recommend SHL assessments based on a query or URL.
-        
-        Args:
-            query (str): The user's search query
-            url (str, optional): URL to job posting to extract additional context
-            top_k (int): Number of recommendations to return
-            
-        Returns:
-            list: List of recommendation dictionaries containing assessment details and scores
-        """
+        """Get recommendations based on the query."""
         try:
-            # Process URL if provided
-            if url:
-                content = self.fetch_content_from_url(url)
-                if content:
-                    query = content if not query else f"{query}\n\nJob Description: {content}"
+            logger.info(f"Starting recommendation process for query: {query}")
             
-            # Enhance query with Gemini
-            enhanced_query = self.enhance_query(query)
-            print(f"Enhanced query: {enhanced_query[:100]}...")
-            
-            # Extract duration constraint
-            duration_constraint = self.extract_duration_constraint(query)
-            if duration_constraint:
-                print(f"Duration constraint: {duration_constraint} minutes")
-            
-            # Extract skills
-            skills = self.extract_skills(query)
-            print(f"Extracted skills: {skills}")
-            
-            # Get embedding for query
-            query_embedding = self.get_embedding(enhanced_query)
-            
-            # Try MongoDB-based similarity search first
-            try:
-                similar_results = self.embedding_storage.search_similar(query_embedding, top_k=top_k*2)
-                
-                if similar_results:
-                    print(f"Found {len(similar_results)} similar assessments using MongoDB")
-                    
-                    # Get assessment details from the dataframe
-                    recommendations = []
-                    for result in similar_results:
-                        assessment_id = result["assessment_id"]
-                        base_similarity = result["similarity"]
-                        
-                        # Find the assessment in the dataframe
-                        matching_rows = self.assessments_df[self.assessments_df['_id'].astype(str) == assessment_id]
-                        
-                        if not matching_rows.empty:
-                            assessment = matching_rows.iloc[0].to_dict()
-                            
-                            # Calculate boosted score based on multiple factors
-                            score = base_similarity
-                            
-                            # Boost score if skills match
-                            if skills:
-                                assessment_skills = assessment.get('skills', [])
-                                if isinstance(assessment_skills, str):
-                                    assessment_skills = [s.strip() for s in assessment_skills.split(',')]
-                                skill_matches = sum(1 for skill in skills if skill.lower() in [s.lower() for s in assessment_skills])
-                                if skill_matches > 0:
-                                    score *= (1 + (skill_matches * 0.2))  # Boost by 20% per matching skill
-                            
-                            # Boost score if duration matches constraint
-                            if duration_constraint:
-                                assessment_duration = assessment.get('duration_minutes', 0)
-                                if assessment_duration <= duration_constraint:
-                                    score *= 1.3  # Boost by 30% if duration matches
-                            
-                            # Boost score if test type matches
-                            test_type = assessment.get('test_type', '')
-                            if test_type:
-                                # Check if test_type is a list or string and handle accordingly
-                                if isinstance(test_type, list):
-                                    # If it's a list, check if any of our target types are in the list
-                                    if any(any(target.lower() in t.lower() for t in test_type if isinstance(t, str)) 
-                                           for target in ['cognitive', 'skills', 'personality']):
-                                        score *= 1.2  # Boost by 20% for relevant test types
-                                else:
-                                    # If it's not a list (assumed to be string), proceed as before
-                                    if any(t.lower() in test_type.lower() for t in ['cognitive', 'skills', 'personality']):
-                                        score *= 1.2  # Boost by 20% for relevant test types
-                            
-                            # Normalize score to be between 0 and 1
-                            score = min(1.0, max(0.0, score))
-                            
-                            # Convert numpy/pandas types to Python native types for JSON serialization
-                            for key, value in assessment.items():
-                                if isinstance(value, (np.integer, np.floating)):
-                                    assessment[key] = float(value) if isinstance(value, np.floating) else int(value)
-                                elif isinstance(value, np.ndarray):
-                                    assessment[key] = value.tolist()
-                            
-                            # Add score for API format compatibility
-                            assessment['score'] = float(score)
-                            recommendations.append(assessment)
-                    
-                    # Apply duration constraint if specified
-                    if duration_constraint and duration_constraint > 0:
-                        original_count = len(recommendations)
-                        filtered_recommendations = []
-                        for rec in recommendations:
-                            duration = rec.get('duration_minutes', 0)
-                            if duration <= duration_constraint:
-                                filtered_recommendations.append(rec)
-                        
-                        if filtered_recommendations:
-                            print(f"Filtered from {original_count} to {len(filtered_recommendations)} recommendations based on duration constraint")
-                            recommendations = filtered_recommendations
-                    
-                    # Sort by boosted score
-                    recommendations = sorted(recommendations, key=lambda x: x.get('score', 0), reverse=True)
-                    
-                    # Format for API response
-                    for rec in recommendations:
-                        # Ensure all values can be JSON serialized
-                        for key, value in list(rec.items()):
-                            if isinstance(value, (np.ndarray, list)) and key != 'test_type_names' and key != 'job_levels':
-                                rec[key] = str(value)
-                    
-                    return recommendations[:top_k]
-            except Exception as e:
-                print(f"Error in MongoDB similarity search: {e}")
-                traceback.print_exc()
-            
-            # Fallback to FAISS if MongoDB search fails
-            print("Falling back to FAISS index for search...")
-            
-            # Get embedding for query
-            embedding = self.get_embedding(enhanced_query)
-            if embedding is None:
+            # Get query embedding
+            query_embedding = self.get_embedding(query)
+            if query_embedding is None:
+                logger.error("Failed to get query embedding")
                 return []
             
-            # Convert to numpy array
-            query_vector = np.array([embedding], dtype=np.float32)
-            
-            # Search
-            distances, indices = self.index.search(query_vector, top_k * 2)
-            
-            # Get recommendations
-            recommendations = []
-            for i, idx in enumerate(indices[0]):
-                if idx >= 0 and idx < len(self.assessments_df):
-                    assessment = self.assessments_df.iloc[idx].to_dict()
-                    
-                    # Calculate boosted score based on multiple factors
-                    base_similarity = float(1.0 - distances[0][i])
-                    score = base_similarity
-                    
-                    # Boost score if skills match
-                    if skills:
-                        assessment_skills = assessment.get('skills', [])
-                        if isinstance(assessment_skills, str):
-                            assessment_skills = [s.strip() for s in assessment_skills.split(',')]
-                        skill_matches = sum(1 for skill in skills if skill.lower() in [s.lower() for s in assessment_skills])
-                        if skill_matches > 0:
-                            score *= (1 + (skill_matches * 0.2))  # Boost by 20% per matching skill
-                    
-                    # Boost score if duration matches constraint
-                    if duration_constraint:
-                        assessment_duration = assessment.get('duration_minutes', 0)
-                        if assessment_duration <= duration_constraint:
-                            score *= 1.3  # Boost by 30% if duration matches
-                    
-                    # Boost score if test type matches
-                    test_type = assessment.get('test_type', '')
-                    if test_type:
-                        # Check if test_type is a list or string and handle accordingly
-                        if isinstance(test_type, list):
-                            # If it's a list, check if any of our target types are in the list
-                            if any(any(target.lower() in t.lower() for t in test_type if isinstance(t, str)) 
-                                   for target in ['cognitive', 'skills', 'personality']):
-                                score *= 1.2  # Boost by 20% for relevant test types
-                        else:
-                            # If it's not a list (assumed to be string), proceed as before
-                            if any(t.lower() in test_type.lower() for t in ['cognitive', 'skills', 'personality']):
-                                score *= 1.2  # Boost by 20% for relevant test types
-                    
-                    # Normalize score to be between 0 and 1
-                    score = min(1.0, max(0.0, score))
-                    
-                    # Convert numpy/pandas types to Python native types for JSON serialization
-                    for key, value in assessment.items():
-                        if isinstance(value, (np.integer, np.floating)):
-                            assessment[key] = float(value) if isinstance(value, np.floating) else int(value)
-                        elif isinstance(value, np.ndarray):
-                            assessment[key] = value.tolist()
-                    
-                    # Add score for API format compatibility
-                    assessment['score'] = float(score)
-                    recommendations.append(assessment)
-            
-            # Apply duration constraint if specified
-            if duration_constraint and duration_constraint > 0:
-                original_count = len(recommendations)
-                filtered_recommendations = []
-                for rec in recommendations:
-                    duration = rec.get('duration_minutes', 0)
-                    if duration <= duration_constraint:
-                        filtered_recommendations.append(rec)
+            # Try MongoDB search first
+            try:
+                client = self.get_mongo_client()
+                db = client[MONGO_DB]
+                embeddings_collection = db[MONGO_EMBEDDINGS_COLLECTION]
                 
-                if filtered_recommendations:
-                    print(f"Filtered from {original_count} to {len(filtered_recommendations)} recommendations based on duration constraint")
-                    recommendations = filtered_recommendations
+                # Convert query embedding to list for MongoDB
+                query_embedding_list = query_embedding.tolist()
+                
+                # Create aggregation pipeline for vector search
+                pipeline = [
+                    {
+                        "$vectorSearch": {
+                            "queryVector": query_embedding_list,
+                            "path": "embedding",
+                            "numCandidates": 100,
+                            "limit": top_k,
+                            "index": "vector_index"
+                        }
+                    },
+                    {
+                        "$project": {
+                            "_id": 1,
+                            "score": {"$meta": "vectorSearchScore"}
+                        }
+                    }
+                ]
+                
+                # Execute search
+                results = list(embeddings_collection.aggregate(pipeline))
+                logger.info(f"Found {len(results)} similar assessments using MongoDB")
+                
+                if results:
+                    # Get full assessment details
+                    assessment_ids = [r["_id"] for r in results]
+                    assessments = list(db[MONGO_COLLECTION_INDIVIDUAL].find({"_id": {"$in": assessment_ids}}))
+                    logger.info(f"Retrieved {len(assessments)} assessment details")
+                    return assessments
+                
+            except Exception as e:
+                logger.error(f"MongoDB search failed: {str(e)}")
+                logger.error(traceback.format_exc())
             
-            # Sort by boosted score
-            recommendations = sorted(recommendations, key=lambda x: x.get('score', 0), reverse=True)
+            # Fallback to FAISS search if MongoDB fails
+            try:
+                if hasattr(self, 'index') and self.index is not None:
+                    # Search using FAISS
+                    D, I = self.index.search(query_embedding.reshape(1, -1), top_k)
+                    logger.info(f"Found {len(I[0])} similar assessments using FAISS")
+                    
+                    # Get assessment details
+                    results = []
+                    for idx in I[0]:
+                        if idx < len(self.assessments_df):
+                            assessment = self.assessments_df.iloc[idx].to_dict()
+                            results.append(assessment)
+                    return results
+            except Exception as e:
+                logger.error(f"FAISS search failed: {str(e)}")
+                logger.error(traceback.format_exc())
             
-            # Format for API response
-            for rec in recommendations:
-                # Ensure all values can be JSON serialized
-                for key, value in list(rec.items()):
-                    if isinstance(value, (np.ndarray, list)) and key != 'test_type_names' and key != 'job_levels':
-                        rec[key] = str(value)
+            logger.warning("Both MongoDB and FAISS search failed, returning empty results")
+            return []
             
-            return recommendations[:top_k]
         except Exception as e:
-            print(f"Error in recommendation: {e}")
-            traceback.print_exc()
+            logger.error(f"Error in recommend method: {str(e)}")
+            logger.error(traceback.format_exc())
             return []
     
     def generate_natural_language_response(self, query, recommendations, duration_constraint=None):

@@ -197,8 +197,9 @@ async def post_recommendations(request: RecommendationRequest):
 
 if __name__ == "__main__":
     # Get port from environment variable or use default
-    port = int(os.getenv("PORT", 8000))
+    port = int(os.getenv("PORT", 10000))  # Changed default port to 10000 for Render
+    host = "0.0.0.0"  # Allow external connections
     
     # Run the FastAPI app
-    logger.info(f"Starting FastAPI server on port {port}")
-    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=True)
+    logger.info(f"Starting FastAPI server on {host}:{port}")
+    uvicorn.run("app:app", host=host, port=port, reload=False)  # Disabled reload for production
